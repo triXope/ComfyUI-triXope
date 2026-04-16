@@ -1,89 +1,34 @@
-# ComfyUI CustomNode Template
+Here you will find a collection of custom nodes for ComfyUI with the intent of enhancing your film production workflow.
 
-This is the [ComfyUI](https://github.com/comfyanonymous/ComfyUI) custom node template repository that anyone can use to create their own custom nodes.
+Let me preface by saying that I am not a developer by trade, nor do I have a background in programming. I come from a traditional filmmaking background, with my focus being writing, directing, and cinematography.
 
-## Directory Structure
-```
-Project-Name/
-├── .github/                # GA workflow for publishing the ComfyUI registry 
-├── workflows/              # Example workflows for your custom node
-├── modules/                # Your own modules for the custom node
-├── .gitignore              # gitignore file 
-├── __init__.py             # Map your custom node display names here 
-├── nodes.py                # Your custom node classes  
-├── README.md               # README file
-├── pyproject.toml          # Metadata file for the ComfyUI registry
-└── requirements.txt        # Project dependencies 
-```
+With that said, I have been following the AI scene for quite some time now, working behind the scene on ways to implement AI into my own personal workflow and finding ways to utilize it as a tool, rather than try to fight it's constant progression - a battle that we cannot win.
 
-## Custom Node Files
+The current highlight of this collection is a massive LTXV all-in-one node, Film Auteur (LTXV), which was designed with LTX 2.3 as the backbone.
+What started off as a simple idea to create a node for injecting reference images into LTX quickly became a highly ambitious project.
+It's not perfect, but it works.
+At first glance, I'm sure the node looks overwhelming, with so much packed into it, but I assure you it's really not that bad, and can easily be broken down into sections to better understand it.
 
-### [nodes.py](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/nodes.py)
-This file is where your actual custom node classes are defined. The class has specific methods that are called by the ComfyUI engine.
-There're some basic custom nodes for the example with some comments, you can modify them as you need.
-For detailed information on how to create custom nodes, please refer to the ComfyUI official documentation: 
-- https://docs.comfy.org/essentials/custom_node_walkthrough.
+What the node does/features:
 
-### [__init__.py](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/__init__.py)
-You can map your custom node display names here. It will be used when users search for your custom node in the ComfyUI.
+• Text-to-Video
+• Image-to-Video
+• Image Reference-to-Video
+• Audio-to-Video
+• Audio Reference (with ID-LoRA)
+• Ollama integration for prompt enhancement (I recommend Gemma 4)
+• Length input as seconds (calculated & converted to frame count internally based on fps)
+• Multi-shot inferencing using "|" separators between prompts
+• first_frame input accepts image batch for storyboard processing (1 shot per image coinciding with multi-prompt input)
+• Inifinite (truly) length by use of autoregressive chunking and built-in sliding context windows
+• Up to 3 sampling stages for built-in upsampling (model2_opt if wanted for stages 2 & 3)
+• Temporal upscaling option (double framerate and visual refinement)
+• Face restoration to help with cleaning up faces and removing artifacts
+• Built-in sageattention and fp16 accumulation (must be installed to use)
+• Built in chunk feed forward (to assist in computational efficiency)
 
-### [pyproject.toml](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/pyproject.toml)
-This file is used to publish your custom node to the ComfyUI registry. If you want to publish your custom node to the ComfyUI registry, you need to modify this file.
+Note: Refer to the tooltips for important information.
 
-If you wonder what ComfyUI registry is, please read:
+Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.
 
-- https://docs.comfy.org/registry/overview#why-use-the-registry
-
-### [requirements.txt](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/requirements.txt)
-This file contains the dependencies needed for your custom node. `torch` is already installed in the ComfyUI, so you only need to add "extra" dependencies here.
-
-### [workflows/example-1.json](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/workflows)
-This is optional, but it is recommended to put your ComfyUI workflow json file inside your project so users can easily understand how to use your custom node.
-
-## Github Actions
-
-### [publish-comfyui-registry.yml](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/.github/workflows/publish-comfyui-registry.yml)
-When you push into the `master` branch, this workflow will be triggered and publish your custom node to the ComfyUI registry, using your [pyproject.toml](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/tree/master/pyproject.toml).
-You have to register your "REGISTRY_ACCESS_TOKEN" in the Github Action Secrets which you can get from:
-- https://docs.comfy.org/registry/publishing#create-an-api-key-for-publishing
-
-After generating the repository from this template, uncomment the push to enable the workflow with auto trigger:
-
-https://github.com/jhj0517/ComfyUI-CustomNodes-Template/blob/6ae10a1d161933c5e3cff432e1c8bbc9396be954/.github/workflows/publish-comfyui-registry.yml#L4-L10
-
-## Github Issue & PR templates
-
-There are some basic templates for the Github issues & PR. You can edit them or add more to fit your project's needs.
-
-- Issue Templates:
-  1. [bug_report.md](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/blob/master/.github/ISSUE_TEMPLATE/bug_report.md) : Basic bug report template
-  2. [feature_request.md](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/blob/master/.github/ISSUE_TEMPLATE/feature_request.md) : Feature request template
-
-- PR Template: [pull_request_template.md](https://github.com/jhj0517/ComfyUI-CustomNodes-Template/blob/master/.github/pull_request_template.md)
-
-
-## How to Strat Using Template
-
-Click "Use this template" -> "Create a new repository", then you can create your own custom node from there.
-
-![image](https://github.com/user-attachments/assets/fab4da53-0458-4e88-adc1-5bb5d341a511)
-
-The custom node installation guide below can usually be used for any custom node, you can use it in your README by modifying the repository name and URL.
-## Installation
-
-1. git clone repository into `ComfyUI\custom_nodes\`
-```
-git clone https://github.com/replace-this-with-your-github-repository-url.git
-```
-
-2. Go to `ComfyUI\custom_nodes\ComfyUI-Your-CustomNode-Name` and run
-```
-pip install -r requirements.txt
-```
-
-If you are using the portable version of ComfyUI, do this:
-```
-python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-Your-CustomNode-Name\requirements.txt
-```
-
-
+More nodes coming soon...
