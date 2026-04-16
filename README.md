@@ -11,21 +11,21 @@ At first glance, I'm sure the node looks overwhelming, with so much packed into 
 
 What the node does/features:
 
-• Text-to-Video
-• Image-to-Video
-• Image Reference-to-Video
-• Audio-to-Video
-• Audio Reference (with ID-LoRA)
-• Ollama integration for prompt enhancement (I recommend Gemma 4)
-• Length input as seconds (calculated & converted to frame count internally based on fps)
-• Multi-shot inferencing using "|" separators between prompts
-• first_frame input accepts image batch for storyboard processing (1 shot per image coinciding with multi-prompt input)
-• Inifinite (truly) length by use of autoregressive chunking and built-in sliding context windows
-• Up to 3 sampling stages for built-in upsampling (model2_opt if wanted for stages 2 & 3)
-• Temporal upscaling option (double framerate and visual refinement)
-• Face restoration to help with cleaning up faces and removing artifacts
-• Built-in sageattention and fp16 accumulation (must be installed to use)
-• Built in chunk feed forward (to assist in computational efficiency)
+• Text-to-Video <br>
+• Image-to-Video <br>
+• Image Reference-to-Video <br>
+• Audio-to-Video <br>
+• Audio Reference (with ID-LoRA) <br>
+• Ollama integration for prompt enhancement (I recommend Gemma 4) <br>
+• Length input as seconds (calculated & converted to frame count internally based on fps) <br>
+• Multi-shot inferencing using "|" separators between prompts <br>
+• first_frame input accepts image batch for storyboard processing (1 shot per image coinciding with multi-prompt input) <br>
+• Inifinite (truly) length by use of autoregressive chunking and built-in sliding context windows <br>
+• Up to 3 sampling stages for built-in upsampling (model2_opt if wanted for stages 2 & 3) <br>
+• Temporal upscaling option (double framerate and visual refinement) <br>
+• Face restoration to help with cleaning up faces and removing artifacts <br>
+• Built-in sageattention and fp16 accumulation (must be installed to use) <br>
+• Built in chunk feed forward (to assist in computational efficiency) <br>
 
 Note: Refer to the tooltips for important information.
 
