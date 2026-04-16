@@ -23,9 +23,11 @@ What the node does/features:
 • Inifinite (truly) length by use of autoregressive chunking and built-in sliding context windows <br>
 • Up to 3 sampling stages for built-in upsampling (model2_opt if wanted for stages 2 & 3) <br>
 • Temporal upscaling option (double framerate and visual refinement) <br>
-• Face restoration to help with cleaning up faces and removing artifacts <br>
+• Face restoration to help with cleaning up faces and removing artifacts (place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. codeformer, GFPGAN, etc.)) <br>
 • Built-in sageattention and fp16 accumulation (must be installed to use) <br>
 • Built in chunk feed forward (to assist in computational efficiency) <br>
+
+Requirements: Download and place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. codeformer, GFPGAN, etc.)
 
 Note: Refer to the tooltips for important information.
 
