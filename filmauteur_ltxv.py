@@ -273,6 +273,8 @@ class FilmAuteur_LTXV:
                 "enable_fp16_accumulation": ("BOOLEAN", {"default": False}),
                 "sage_attention": (sageattn_modes, {"default": "disabled"}),
                 "chunks": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1}),
+
+                "stage_1_preview": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "model2_opt": ("MODEL", {"tooltip": "Optional model for upsample stages 2 and 3. If disconnected, the main model is used.", "forceInput": True}),
@@ -282,7 +284,8 @@ class FilmAuteur_LTXV:
                 "audio_ref": ("AUDIO", {"tooltip": "Voice reference for ID-LoRA (active if load_audio_from_file is False)."}),
                 "image_ref": ("IMAGE", {"tooltip": "Batch of concept images to condition the video globally."}),
                 "first_frame(s)": ("IMAGE",),
-            }
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"}
         }
 
     RETURN_TYPES = ("STRING", "LATENT", "LATENT", "LATENT", "VIDEO", "IMAGE", "AUDIO", "FLOAT", "INT")
@@ -300,9 +303,9 @@ class FilmAuteur_LTXV:
                 autoregressive_chunking, chunk_size_seconds, context_window_seconds, temporal_upscale, 
                 restore_faces, facerestore_model, facedetection, codeformer_fidelity, 
                 face_restore_color_match, face_restore_edge_blur, face_restore_blend,
-                enable_fp16_accumulation, sage_attention, chunks,
+                enable_fp16_accumulation, sage_attention, chunks, stage_1_preview,
                 model2_opt=None, spatial_upscaler=None, temporal_upscaler=None, 
-                audio_input=None, audio_ref=None, image_ref=None, **kwargs):
+                audio_input=None, audio_ref=None, image_ref=None, unique_id=None, **kwargs):
 
         # ==========================================
         # 0. MODE OVERRIDES
@@ -1051,6 +1054,77 @@ Output only the prompt. Nothing before it, nothing after it."""
                 
             sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
 
+        # ==========================================
+        # MID-GENERATION STAGE 1 PREVIEW
+        # ==========================================
+        if stage_1_preview and (sampling_stages > 1 or temporal_upscale):
+            print("\n--- Generating Stage 1 Preview ---")
+            import uuid
+            uid = unique_id if unique_id is not None else str(uuid.uuid4())
+            
+            # Safely unbind the master tensor regardless of which timeline path was taken
+            v_samps_prev, _ = sampled_tensor.unbind()
+            v_samps_prev = v_samps_prev.to(device)
+            v_batch_p, _, v_frames_p, v_height_p, v_width_p = v_samps_prev.shape
+            v_t_scale, v_w_scale, v_h_scale = video_vae.downscale_index_formula
+            
+            out_v_frames_p = 1 + (v_frames_p - 1) * v_t_scale
+            out_v_height_p = v_height_p * v_h_scale
+            out_v_width_p = v_width_p * v_w_scale
+            
+            preview_video = torch.empty((v_batch_p, out_v_frames_p, out_v_height_p, out_v_width_p, 3), device=device, dtype=v_samps_prev.dtype)
+            
+            temp_tile_len = 48
+            temp_overlap = 8
+            chunk_start = 0
+            
+            # Fast, memory-efficient sliding window decode (bypasses face-restore for speed)
+            while chunk_start < v_frames_p:
+                comfy.model_management.soft_empty_cache()
+                if chunk_start == 0:
+                    chunk_end = min(chunk_start + temp_tile_len, v_frames_p)
+                    overlap_start = chunk_start
+                else:
+                    overlap_start = max(1, chunk_start - temp_overlap - 1)
+                    chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), v_frames_p)
+                
+                tile = v_samps_prev[:, :, overlap_start:chunk_end]
+                tile_decoded = video_vae.decode(tile) 
+                tile_out_frames = 1 + (tile.shape[2] - 1) * v_t_scale
+                tile_decoded = tile_decoded.view(v_batch_p, tile_out_frames, out_v_height_p, out_v_width_p, 3)
+                
+                if chunk_start == 0:
+                    preview_video[:, :tile_decoded.shape[1]] = tile_decoded
+                else:
+                    tile_decoded = tile_decoded[:, 1:] 
+                    out_t_start = 1 + overlap_start * v_t_scale
+                    out_t_end = out_t_start + tile_decoded.shape[1]
+                    overlap_frames = temp_overlap * v_t_scale
+                    frame_weights = torch.linspace(0, 1, overlap_frames + 2, device=device, dtype=tile_decoded.dtype)[1:-1].view(1, -1, 1, 1, 1)
+                    after_overlap = out_t_start + overlap_frames
+                    
+                    preview_video[:, out_t_start:after_overlap] *= 1 - frame_weights
+                    preview_video[:, out_t_start:after_overlap] += (frame_weights * tile_decoded[:, :overlap_frames])
+                    preview_video[:, after_overlap:out_t_end] = tile_decoded[:, overlap_frames:]
+                    
+                chunk_start = chunk_end
+                
+            preview_video = preview_video[0] # Isolate the batch
+            preview_video = (preview_video.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            
+            temp_dir = folder_paths.get_temp_directory()
+            preview_filename = f"stage1_preview_{uid}.webp"
+            preview_path = os.path.join(temp_dir, preview_filename)
+            
+            # Save as an animated WebP format for fast UI loading
+            pil_frames = [Image.fromarray(frame) for frame in preview_video]
+            if pil_frames:
+                pil_frames[0].save(preview_path, save_all=True, append_images=pil_frames[1:], duration=int(1000/current_fps), loop=0, format='WEBP')
+                
+            # Broadcast the Webpack command to the UI!
+            PromptServer.instance.send_sync("trixope_ltxv_preview", {"node": uid, "filename": preview_filename, "type": "temp"})
+            print(f"--- Stage 1 Preview Sent to UI ---")
+            comfy.model_management.soft_empty_cache()
 
         # ==========================================
         # UNIVERSAL SLIDING WINDOW UPSCALER ENGINE
