@@ -273,8 +273,7 @@ class FilmAuteur_LTXV:
                 "enable_fp16_accumulation": ("BOOLEAN", {"default": False}),
                 "sage_attention": (sageattn_modes, {"default": "disabled"}),
                 "chunks": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1}),
-
-                "stage_1_preview": ("BOOLEAN", {"default": True}),
+                "stage_1_preview": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "model2_opt": ("MODEL", {"tooltip": "Optional model for upsample stages 2 and 3. If disconnected, the main model is used.", "forceInput": True}),
@@ -305,7 +304,7 @@ class FilmAuteur_LTXV:
                 face_restore_color_match, face_restore_edge_blur, face_restore_blend,
                 enable_fp16_accumulation, sage_attention, chunks, stage_1_preview,
                 model2_opt=None, spatial_upscaler=None, temporal_upscaler=None, 
-                audio_input=None, audio_ref=None, image_ref=None, unique_id=None, **kwargs):
+                audio_input=None, audio_ref=None, image_ref=None, unique_id=None,**kwargs):
 
         # ==========================================
         # 0. MODE OVERRIDES
@@ -1055,16 +1054,18 @@ Output only the prompt. Nothing before it, nothing after it."""
             sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
 
         # ==========================================
-        # MID-GENERATION STAGE 1 PREVIEW
+        # MID-GENERATION STAGE 1 PREVIEW (MP4 MUX)
         # ==========================================
         if stage_1_preview and (sampling_stages > 1 or temporal_upscale):
             print("\n--- Generating Stage 1 Preview ---")
             import uuid
             uid = unique_id if unique_id is not None else str(uuid.uuid4())
             
-            # Safely unbind the master tensor regardless of which timeline path was taken
-            v_samps_prev, _ = sampled_tensor.unbind()
+            # Safely unbind without modifying the original tensor for downstream passes
+            v_samps_prev, a_samps_prev = sampled_tensor.unbind()
             v_samps_prev = v_samps_prev.to(device)
+            a_samps_prev = a_samps_prev.to(device)
+            
             v_batch_p, _, v_frames_p, v_height_p, v_width_p = v_samps_prev.shape
             v_t_scale, v_w_scale, v_h_scale = video_vae.downscale_index_formula
             
@@ -1078,7 +1079,6 @@ Output only the prompt. Nothing before it, nothing after it."""
             temp_overlap = 8
             chunk_start = 0
             
-            # Fast, memory-efficient sliding window decode (bypasses face-restore for speed)
             while chunk_start < v_frames_p:
                 comfy.model_management.soft_empty_cache()
                 if chunk_start == 0:
@@ -1109,20 +1109,120 @@ Output only the prompt. Nothing before it, nothing after it."""
                     
                 chunk_start = chunk_end
                 
-            preview_video = preview_video[0] # Isolate the batch
+            preview_video = preview_video[0] 
+            
+            # --- APPLY PREVIEW VIDEO TRIM ---
+            num_preview_frames = preview_video.shape[0]
+            if out_ref_frame_count >= num_preview_frames:
+                preview_video = preview_video[-1:] 
+            elif out_ref_frame_count > 0:
+                preview_video = preview_video[out_ref_frame_count:]
+                
             preview_video = (preview_video.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
             
             temp_dir = folder_paths.get_temp_directory()
-            preview_filename = f"stage1_preview_{uid}.webp"
+            preview_filename = f"stage1_preview_{uid}.mp4"
             preview_path = os.path.join(temp_dir, preview_filename)
+            audio_path = os.path.join(temp_dir, f"stage1_preview_audio_{uid}.wav")
+            out_sample_rate = int(audio_vae.output_sample_rate)
             
-            # Save as an animated WebP format for fast UI loading
-            pil_frames = [Image.fromarray(frame) for frame in preview_video]
-            if pil_frames:
-                pil_frames[0].save(preview_path, save_all=True, append_images=pil_frames[1:], duration=int(1000/current_fps), loop=0, format='WEBP')
+            # --- DECODE AND TRIM AUDIO ---
+            try:
+                print("--- Decoding Stage 1 Preview Audio ---")
                 
-            # Broadcast the Webpack command to the UI!
-            PromptServer.instance.send_sync("trixope_ltxv_preview", {"node": uid, "filename": preview_filename, "type": "temp"})
+                if has_audio_input:
+                    # Pristine audio input route
+                    preview_audio_wf = torchaudio.functional.resample(master_wf.clone(), sampling_rate, out_sample_rate).to(device)
+                elif num_prompts > 1 and autoregressive_chunking:
+                    shot_duration = length_in_seconds / num_prompts
+                    decoded_waveforms = []
+                    for i in range(num_prompts):
+                        start_sec = i * shot_duration
+                        end_sec = (i + 1) * shot_duration
+                        _, start_lat = get_latent_counts(start_sec)
+                        _, end_lat = get_latent_counts(end_sec)
+                        if i == 0: start_lat = 0
+                        if i == num_prompts - 1: end_lat = a_samps_prev.shape[2]
+                        
+                        chunk = a_samps_prev[:, :, start_lat:end_lat]
+                        if chunk.shape[2] > 0:
+                            wf = audio_vae.decode(chunk).to(device)
+                            exact_samples = int(shot_duration * out_sample_rate)
+                            if wf.shape[-1] > exact_samples:
+                                wf = wf[..., :exact_samples]
+                            elif wf.shape[-1] < exact_samples:
+                                wf = torch.nn.functional.pad(wf, (0, exact_samples - wf.shape[-1]))
+                                
+                            fade_samps = min(int(0.05 * out_sample_rate), wf.shape[-1] // 2)
+                            if fade_samps > 0:
+                                wf[..., :fade_samps] *= torch.linspace(0.0, 1.0, fade_samps, device=device, dtype=wf.dtype)
+                                wf[..., -fade_samps:] *= torch.linspace(1.0, 0.0, fade_samps, device=device, dtype=wf.dtype)
+                            decoded_waveforms.append(wf)
+                    preview_audio_wf = torch.cat(decoded_waveforms, dim=-1) if decoded_waveforms else torch.zeros((1, 1, 1024), device=device)
+                else:
+                    preview_audio_wf = audio_vae.decode(a_samps_prev).to(device)
+                
+                wf_out = preview_audio_wf[0].cpu()
+                if wf_out.ndim == 3:
+                    wf_out = wf_out.squeeze(0)
+                    
+                time_to_drop = out_ref_frame_count / current_fps
+                samples_to_drop = int(time_to_drop * out_sample_rate)
+                total_samples = wf_out.shape[-1]
+                
+                if samples_to_drop >= total_samples:
+                    wf_out = torch.zeros((wf_out.shape[0], 1), device=wf_out.device, dtype=wf_out.dtype)
+                elif samples_to_drop > 0:
+                    wf_out = wf_out[..., samples_to_drop:]
+                    fade_samples = min(int(0.03 * out_sample_rate), wf_out.shape[-1])
+                    if fade_samples > 0:
+                        wf_out[..., :fade_samples] *= torch.linspace(0.0, 1.0, fade_samples, device=wf_out.device, dtype=wf_out.dtype)
+                
+                torchaudio.save(audio_path, wf_out, out_sample_rate)
+            except Exception as e:
+                print(f"Warning: Failed to decode preview audio: {e}")
+
+            # --- MP4 MULTIPLEXER (FFMPEG) ---
+            import subprocess
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo",
+                "-vcodec", "rawvideo",
+                "-s", f"{out_v_width_p}x{out_v_height_p}",
+                "-pix_fmt", "rgb24",
+                "-r", str(current_fps),
+                "-i", "-", 
+            ]
+            
+            if os.path.exists(audio_path):
+                cmd.extend(["-i", audio_path])
+                
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "superfast", 
+                "-crf", "28", 
+                "-pix_fmt", "yuv420p", 
+            ])
+            
+            if os.path.exists(audio_path):
+                cmd.extend(["-c:a", "aac", "-b:a", "128k", "-shortest"])
+                
+            cmd.append(preview_path)
+
+            try:
+                print("--- Encoding Low-Bitrate MP4 Preview ---")
+                process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                process.communicate(input=preview_video.tobytes())
+            except FileNotFoundError:
+                print("LTXV Custom Error: FFmpeg not found. Cannot generate MP4 preview.")
+            except Exception as e:
+                print(f"LTXV Custom Error: FFmpeg failed to encode MP4 preview: {e}")
+
+            PromptServer.instance.send_sync("trixope_ltxv_preview", {
+                "node": uid, 
+                "filename": preview_filename, 
+                "type": "temp"
+            })
             print(f"--- Stage 1 Preview Sent to UI ---")
             comfy.model_management.soft_empty_cache()
 
