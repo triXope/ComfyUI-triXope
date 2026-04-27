@@ -12,13 +12,14 @@ At first glance, I'm sure the node looks overwhelming, with so much packed into 
 
 # Nodes
 
-Film Auteur (LTXV) - one node to rule them all.<br>
+Film Auteur (LTXV) - one node to rule them all!<br>
 - Text-to-Video<br>
 - Image-to-Video<br>
 - Image Reference-to-Video (experimental work-in-progress)<br>
 - Audio-to-Video<br>
 - Audio Reference (with ID-LoRA)<br>
 - Ollama integration for prompt enhancement (Gemma 4 26b recommended)<br>
+- Normalized Attention Guidance (NAG) integration for negative prompting with low CFG
 - Length input as seconds (calculated & converted to frame count internally based on fps)<br>
 - Multi-shot inferencing using "|" separators between prompts<br>
 - Image input accepts image batch for storyboard processing (1 shot per image coinciding with multi-prompt input) or reference images<br>
