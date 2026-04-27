@@ -88,7 +88,7 @@ app.registerExtension({
                     { btnName: "grp_input_controls", label: "Mode Select", widgets: ["image_select", "image_strength", "audio_select", "identity_guidance_scale"] },
                     { btnName: "grp_ollama_enhance", label: "LLM Enhance", widgets: ["use_ollama", "ollama_url", "ollama_model"] },
                     { btnName: "grp_timeline_controls", label: "Timeline Control", widgets: ["noise_seed", "control_after_generate", "target_width", "target_height", "length_in_seconds", "frame_rate"] },
-                    { btnName: "grp_sampling", label: "Sampling Config", widgets: ["sampling_stages", "primary_sampler_name", "primary_cfg", "primary_steps", "upsample_sampler_name", "upsample_cfg", "upsample_manual_sigmas", "eta", "bongmath", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds"] },
+                    { btnName: "grp_sampling", label: "Sampling Config", widgets: ["sampling_stages", "primary_sampler_name", "primary_cfg", "primary_steps", "upsample_sampler_name", "upsample_cfg", "upsample_manual_sigmas", "eta", "bongmath", "enable_nag", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds"] },
                     { btnName: "grp_refinement", label: "Upscale & Refine", widgets: ["temporal_upscale", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
                     { btnName: "grp_vram_optimization", label: "VRAM Optimization", widgets: ["enable_fp16_accumulation", "sage_attention", "chunks", "clear_models_and_cache"] }
                 ];
@@ -107,6 +107,7 @@ app.registerExtension({
                     "primary_steps": "Enter a single number for steps (e.g., 20), or a comma-separated list for manual sigmas (e.g., 1.0, 0.995, 0.99, 0.9875, 0.975, 0.65, 0.28, 0.07, 0.0).",
                     "eta": "Calculated noise amount to be added, then removed, after each step.",
                     "bongmath": "Injects BONGMATH parameter into extra_options to act exactly as ClownSampler does for RES4LYF nodes.",
+                    "enable_nag": "Enable Normalized Attention Guidance (NAG) to dramatically improve prompt adherence using optimal hidden settings.",
                     "autoregressive_chunking": "Automatically flush VRAM and outpaint the video in chunks if the length exceeds the chunk size.",
                     "chunk_size_seconds": "The max duration (in seconds) generated in a single pass before flushing VRAM.",
                     "context_window_seconds": "Seconds of previous video the model can 'see'. Caps render time! Set equal to chunk_size to keep rendering times perfectly flat.",
