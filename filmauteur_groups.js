@@ -315,3 +315,26 @@ api.addEventListener("trixope_ltxv_preview", (event) => {
         previewWidget.element.play().catch(e => console.warn("Video autoplay blocked by browser: ", e));
     }
 });
+
+// --- NEW: WIPE PREVIEW ON NEW GENERATION ---
+api.addEventListener("executing", (event) => {
+    const nodeId = event.detail;
+    if (!nodeId) return;
+
+    const node = app.graph.getNodeById(nodeId);
+    if (node && node.type === "FilmAuteur_LTXV") {
+        let toggleWidget = node.widgets && node.widgets.find(w => w.name === "stage_1_preview");
+        let previewWidget = node.widgets && node.widgets.find(w => w.name === "stage1_preview");
+        
+        // Use LiteGraph's native removeWidget to clear it safely without exploding the node layout
+        if (toggleWidget && !toggleWidget.value && previewWidget) {
+            if (previewWidget.element) {
+                previewWidget.element.pause();
+                previewWidget.element.removeAttribute('src');
+                previewWidget.element.load();
+            }
+            node.removeWidget(previewWidget);
+            app.graph.setDirtyCanvas(true, true);
+        }
+    }
+});
