@@ -1,5 +1,5 @@
 # [Perpetual] WORK-IN-PROGRESS
-<b>NOTICE: This repo is under heavy development and is likely to break and/or things not always work as expected. If you run into any errors, please ensure ComfyUI and this repo is fully updated to the latest version and reapply any node from this repo in question. If you still run into any errors or are experiencing any issues, please post your issue so that I can look into it.</b><br><br>
+<b>NOTICE: This repo is under heavy development and is likely to break and/or things not always work as expected. If you run into any errors, please ensure ComfyUI and this repo is fully updated to the latest version and reapply any node from this repo in question. If you still run into any errors, or are experiencing any other issues, please post your issue so that I can look into it.</b><br><br>
 Don't expect everything to function perfectly.<br>
 Please check back frequently as I am making constant updates and improvements...<br><br>
 Here you will find a collection of custom nodes for ComfyUI with the intent of enhancing your film production workflow.<br><br>
