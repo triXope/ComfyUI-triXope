@@ -39,6 +39,9 @@ Note: Refer to the tooltips for important information.<br><br>
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
 More nodes coming soon...<br>
 
+# Known Issues / Bugs
+- Temporal upscaler is not working properly - it's a struggle of quality vs. timing (eg. either clean hi-res output which breaks lip sync, or perfect lip sync with low quality output)
+
 # Installation
 ComfyUI Manager (recommended method)<br><br>
 Manual Method<br>
