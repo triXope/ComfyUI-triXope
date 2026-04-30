@@ -21,6 +21,8 @@ import numpy as np
 import torchaudio
 import types
 import logging
+import av
+import random
 
 from server import PromptServer
 from comfy.ldm.modules.attention import wrap_attn, optimized_attention, attention_pytorch
@@ -285,67 +287,106 @@ class Noise_RandomNoise:
         batch_inds = input_latent.get("batch_index", None)
         return comfy.sample.prepare_noise(latent_image, self.seed, batch_inds)
 
+def encode_single_frame(output_file, image_array: np.ndarray, crf):
+    container = av.open(output_file, "w", format="mp4")
+    try:
+        stream = container.add_stream(
+            "libx264", rate=1, options={"crf": str(crf), "preset": "veryfast"}
+        )
+        stream.height = image_array.shape[0]
+        stream.width = image_array.shape[1]
+        av_frame = av.VideoFrame.from_ndarray(image_array, format="rgb24").reformat(
+            format="yuv420p"
+        )
+        container.mux(stream.encode(av_frame))
+        container.mux(stream.encode())
+    finally:
+        container.close()
+
+def decode_single_frame(video_file):
+    container = av.open(video_file)
+    try:
+        stream = next(s for s in container.streams if s.type == "video")
+        frame = next(container.decode(stream))
+    finally:
+        container.close()
+    return frame.to_ndarray(format="rgb24")
+
+def preprocess_compression(image: torch.Tensor, crf=29):
+    if crf == 0:
+        return image
+    image_array = (image[:(image.shape[0] // 2) * 2, :(image.shape[1] // 2) * 2] * 255.0).byte().cpu().numpy()
+    with BytesIO() as output_file:
+        encode_single_frame(output_file, image_array, crf)
+        video_bytes = output_file.getvalue()
+    with BytesIO(video_bytes) as video_file:
+        image_array = decode_single_frame(video_file)
+    tensor = torch.tensor(image_array, dtype=image.dtype, device=image.device) / 255.0
+    return tensor
+
 class FilmAuteur_LTXV:
 
     @classmethod
     def INPUT_TYPES(cls):
         sampler_names = comfy.samplers.SAMPLER_NAMES
-        primary_default = "res_2s" if "res_2s" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
+        primary_default = "euler" if "euler" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
         upsample_default = "euler_ancestral_cfg_pp" if "euler_ancestral_cfg_pp" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
 
         return {
             "required": {
-                # Setup
+                # --- GROUP: Input/Setup ---
                 "clip": ("CLIP",),
                 "video_vae": ("VAE", {"tooltip": "The LTXV Video VAE model."}),
                 "audio_vae": ("VAE", {"tooltip": "The LTXV Audio VAE model."}),
                 "primary_model": ("MODEL", {"tooltip": "The primary LTXV Model (will be patched if ID-LoRA is active)."}),
 
-                # Prompts
-                "character_descriptions": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": "", "tooltip": "Provide a detailed description for each character (overridden by image reference)."}),
-                "location_description": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": "", "tooltip": "Provide a detailed description of the location(s)."}),
-                "scene_descriptions": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": "", "tooltip": 'Provide a detailed description for each shot, separated by "|" (eg. shot 1 | shot 2 | shot 3). Note: length_in_seconds must be evenly divisible by total number of shots.'}),
-
                 # --- GROUP: Mode Select ---
-                "grp_input_controls": (["▼ Mode Select", "▼ Manual Bypass", "▼ Input"], {}),
-                "image_select": (["text-to-video", "image-to-video", "reference-to-video"], {"default": "text-to-video"}),
-                "image_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
-                "audio_select": (["internal", "input source audio", "input reference audio"], {"default": "internal"}),
+                "grp_mode": (["▼ Mode Select"], {}),
+                "video_mode": (["text", "image", "reference"], {"default": "text"}),
+                "image_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "img_compression": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
+                "audio_select": (["internal", "source", "reference"], {"default": "internal"}),
                 "identity_guidance_scale": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 100.0, "step": 0.01}),
 
-                # --- GROUP: Enhance ---
-                "grp_ollama_enhance": (["▼ LLM Enhance"], {}),
+                # --- GROUP: Prompting ---
+                "grp_prompting": (["▼ Prompting"], {}),
+                "character_descriptions": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
+                "location_description": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
+                "scene_descriptions": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
                 "use_ollama": ("BOOLEAN", {"default": False}),
                 "ollama_url": ("STRING", {"default": "http://127.0.0.1:11434"}),
                 "ollama_model": (OLLAMA_MODELS,),
 
-                # --- GROUP: Timeline ---
-                "grp_timeline_controls": (["▼ Timeline Control"], {}),
-                "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                # --- GROUP: Specs ---
+                "grp_specs": (["▼ Video Specs"], {}),
+                "seed_number": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "control_before_generate": (["randomize", "fixed", "increment", "decrement"], {"default": "randomize"}),
                 "target_width": ("INT", {"default": 1792, "min": 64, "max": 8192, "step": 32}),
                 "target_height": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 32}),
                 "length_in_seconds": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 300.0, "step": 0.1}),
                 "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0}),
 
                 # --- GROUP: Sampling ---
-                "grp_sampling": (["▼ Sampling Config"], {}),
-                "sampling_stages": ("INT", {"default": 1, "min": 1, "max": 3}),
+                "grp_sampling": (["▼ Sampling"], {}),
+                "sampling_stages": ("INT", {"default": 2, "min": 1, "max": 3}),
                 "primary_sampler_name": (sampler_names, {"default": primary_default}),
                 "primary_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
                 "primary_steps": ("STRING", {"multiline": False, "default": "16"}),
                 "upsample_sampler_name": (sampler_names, {"default": upsample_default}),
-                "upsample_cfg": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
-                "upsample_manual_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
-                "eta": ("FLOAT", {"default": 0.95, "min": -100.0, "max": 100.0, "step": 0.01, "round": False}),
+                "spatial_cfg": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
+                "spatial_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
+                "eta": ("FLOAT", {"default": 0.5, "min": -100.0, "max": 100.0, "step": 0.01, "round": False}),
                 "bongmath": ("BOOLEAN", {"default": True}),
-                "enable_nag": ("BOOLEAN", {"default": True, "tooltip": "Enable Normalized Attention Guidance (NAG) to improve prompt adherence."}),
+                "enable_nag": ("BOOLEAN", {"default": True}),
                 "autoregressive_chunking": ("BOOLEAN", {"default": True}),
                 "chunk_size_seconds": ("FLOAT", {"default": 30.0, "min": 5.0, "max": 300.0, "step": 1.0}),
                 "context_window_seconds": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 300.0, "step": 1.0}),
 
                 # --- GROUP: Refinement ---
-                "grp_refinement": (["▼ Upscale & Refine"], {}),
+                "grp_refinement": (["▼ Refinement"], {}),
                 "temporal_upscale": ("BOOLEAN", {"default": False}),
+                "temporal_cfg": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
+                "temporal_sigmas": ("STRING", {"multiline": False, "default": "0.60, 0.40, 0.20, 0.0"}),
                 "restore_faces": ("BOOLEAN", {"default": False}),
                 "facerestore_model": (get_trixope_facerestore_models(), {}),
                 "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"], {}),
@@ -354,14 +395,16 @@ class FilmAuteur_LTXV:
                 "face_restore_edge_blur": ("BOOLEAN", {"default": True}),
                 "face_restore_blend": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05}),
 
-                # --- GROUP: VRAM ---
-                "grp_vram_optimization": (["▼ VRAM Optimization"], {}),
+                # --- GROUP: Performance ---
+                "grp_performance": (["▼ Performance"], {}),
                 "enable_fp16_accumulation": ("BOOLEAN", {"default": False}),
                 "sage_attention": (sageattn_modes, {"default": "disabled"}),
                 "chunks": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1}),
                 "clear_models_and_cache": ("BOOLEAN", {"default": True}),
 
-                "stage_1_preview": ("BOOLEAN", {"default": True}),
+                # --- GROUP: Preview ---
+                "grp_preview": (["▼ Preview"], {}),
+                "enable_preview": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "model2_opt": ("MODEL", {"tooltip": "Optional model for upsample stages 2 and 3. If disconnected, the main model is used.", "forceInput": True}),
@@ -378,24 +421,24 @@ class FilmAuteur_LTXV:
     FUNCTION = "process"
     CATEGORY = "triXope"
 
-    def process(self, clip, video_vae, audio_vae, primary_model, character_descriptions, location_description, scene_descriptions, 
-                image_select, image_strength, audio_select, identity_guidance_scale,
+    def process(self, clip, video_vae, audio_vae, primary_model, character_descriptions, location_description, scene_descriptions,
+                video_mode, image_strength, img_compression, audio_select, identity_guidance_scale,
                 use_ollama, ollama_url, ollama_model,
-                noise_seed, target_width, target_height, length_in_seconds, frame_rate, 
-                sampling_stages, primary_sampler_name, primary_cfg, primary_steps, 
-                upsample_sampler_name, upsample_cfg, upsample_manual_sigmas, eta, bongmath, enable_nag,
-                autoregressive_chunking, chunk_size_seconds, context_window_seconds, temporal_upscale, 
-                restore_faces, facerestore_model, facedetection, codeformer_fidelity, 
+                seed_number, control_before_generate, target_width, target_height, length_in_seconds, frame_rate,
+                sampling_stages, primary_sampler_name, primary_cfg, primary_steps,
+                upsample_sampler_name, spatial_cfg, spatial_sigmas, eta, bongmath, enable_nag,
+                autoregressive_chunking, chunk_size_seconds, context_window_seconds, temporal_upscale, temporal_cfg, temporal_sigmas,
+                restore_faces, facerestore_model, facedetection, codeformer_fidelity,
                 face_restore_color_match, face_restore_edge_blur, face_restore_blend,
-                enable_fp16_accumulation, sage_attention, chunks, clear_models_and_cache, stage_1_preview,
-                model2_opt=None, spatial_upscaler=None, temporal_upscaler=None, 
+                enable_fp16_accumulation, sage_attention, chunks, clear_models_and_cache, enable_preview,
+                model2_opt=None, spatial_upscaler=None, temporal_upscaler=None,
                 images=None, audio=None, unique_id=None, **kwargs):
 
         unique_id_val = unique_id[0] if isinstance(unique_id, list) else unique_id
 
         # --- MAP TO INTERNAL VARIABLES TO PRESERVE ALL MATH ---
-        bypass_img_ref = (image_select != "reference-to-video")
-        bypass_first_frame = (image_select != "image-to-video")
+        bypass_img_ref = (video_mode != "reference")
+        bypass_first_frame = (video_mode != "image")
         
         image_ref = images if not bypass_img_ref else None
         first_frame = images if not bypass_first_frame else None
@@ -407,10 +450,10 @@ class FilmAuteur_LTXV:
         if audio_select == "internal":
             load_audio_from_file = False
             bypass_audio_ref = True
-        elif audio_select == "input source audio":
+        elif audio_select == "source":
             load_audio_from_file = True
             bypass_audio_ref = True
-        elif audio_select == "input reference audio":
+        elif audio_select == "reference":
             load_audio_from_file = False
             bypass_audio_ref = False
         else:
@@ -457,7 +500,7 @@ class FilmAuteur_LTXV:
             return len(list(range(0, total_latent_frames, temp_tile_len - temp_overlap)))
 
         sp_chunks = count_sliding_chunks(latent_frames_base) * (sampling_stages - 1)
-        sp_steps = max(1, len(re.findall(r"[-+]?(?:\d*\.*\d+)", str(upsample_manual_sigmas))) - 1) if sampling_stages > 1 else 0
+        sp_steps = max(1, len(re.findall(r"[-+]?(?:\d*\.*\d+)", str(spatial_sigmas))) - 1) if sampling_stages > 1 else 0
         
         tm_chunks = count_sliding_chunks(latent_frames_base) if temporal_upscale else 0
         tm_steps = 3 if temporal_upscale else 0 
@@ -528,7 +571,7 @@ class FilmAuteur_LTXV:
             raw_prompts = [""]
             num_prompts = 1
 
-        override_char_desc = (not bypass_img_ref) and (image_ref is not None)
+        override_char_desc = (not bypass_img_ref) and (image_ref is not None) and use_ollama
         c_desc = character_descriptions.strip()
         l_desc = location_description.strip()
 
@@ -752,6 +795,12 @@ Output only the prompt. Nothing before it, nothing after it."""
         a = 0
 
         if not bypass_img_ref and image_ref is not None:
+            if img_compression > 0:
+                compressed_images = []
+                for i in range(image_ref.shape[0]):
+                    compressed_images.append(preprocess_compression(image_ref[i], img_compression))
+                image_ref = torch.stack(compressed_images)
+                
             image_ref_processed = process_ref_image(image_ref)
             a += image_ref_processed.shape[0]
             for idx in range(image_ref_processed.shape[0]):
@@ -760,6 +809,12 @@ Output only the prompt. Nothing before it, nothing after it."""
                 strengths.extend([image_ref_str] * duplicate_frames)
 
         if not bypass_first_frame and first_frame is not None:
+            if img_compression > 0:
+                compressed_images = []
+                for i in range(first_frame.shape[0]):
+                    compressed_images.append(preprocess_compression(first_frame[i], img_compression))
+                first_frame = torch.stack(compressed_images)
+                
             first_frame_processed = process_ref_image(first_frame)
             pixel_frames.append(first_frame_processed[0:1])
             strengths.append(first_frame_str)
@@ -1161,13 +1216,13 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # 6. SAMPLING & UPSCALING LOOP
         # ==========================================
-        noise_obj = Noise_RandomNoise(noise_seed)
+        noise_obj = Noise_RandomNoise(seed_number)
         
         primary_guider = comfy.samplers.CFGGuider(model_to_use)
         primary_guider.set_cfg(primary_cfg)
 
         upsample_guider = comfy.samplers.CFGGuider(model2_to_use)
-        upsample_guider.set_cfg(upsample_cfg)
+        upsample_guider.set_cfg(spatial_cfg)
 
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
@@ -1224,7 +1279,7 @@ Output only the prompt. Nothing before it, nothing after it."""
             callback = wrap_callback(base_cb, "Base Generation")
 
             print(f"\n--- Running Autoregressive Pass 1/1 (Dimensions: {initial_width}x{initial_height}) ---")
-            sampled_tensor = primary_guider.sample(noise_obj.generate_noise(current_latent), latent_image, primary_sampler, primary_sigmas, denoise_mask=av_noise_mask, callback=callback, disable_pbar=disable_pbar, seed=noise_seed)
+            sampled_tensor = primary_guider.sample(noise_obj.generate_noise(current_latent), latent_image, primary_sampler, primary_sigmas, denoise_mask=av_noise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
             sampled_tensor = sampled_tensor.to(device)
             
         else:
@@ -1277,7 +1332,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                         
                     base_cb = latent_preview.prepare_callback(primary_guider.model_patcher, primary_sigmas.shape[-1] - 1, x0_output)
                     callback = wrap_callback(base_cb, f"Base Shot {s+1}")
-                    sampled_chunk = primary_guider.sample(noise_obj.generate_noise(current_latent), latent_image, primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=noise_seed)
+                    sampled_chunk = primary_guider.sample(noise_obj.generate_noise(current_latent), latent_image, primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
                     
                     unbound = sampled_chunk.unbind()
                     res_v = unbound[0].to(device)
@@ -1297,7 +1352,7 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # MID-GENERATION STAGE 1 PREVIEW (MP4 MUX)
         # ==========================================
-        if stage_1_preview and (sampling_stages > 1 or temporal_upscale):
+        if enable_preview and (sampling_stages > 1 or temporal_upscale):
             print("\n--- Generating Stage 1 Preview ---")
             import uuid
             uid = node_id if node_id is not None else str(uuid.uuid4())
@@ -1447,7 +1502,7 @@ Output only the prompt. Nothing before it, nothing after it."""
         def process_sliding_window_upscale(pass_name, is_temporal, v_samps, a_samps,
                                            upscaler_model, guider, sampler, sigmas,
                                            noise_obj, eta, bongmath, final_pixels, strengths,
-                                           time_scale_factor, width_scale_factor, height_scale_factor, video_vae, current_fps, disable_pbar, noise_seed, wrap_callback):
+                                           time_scale_factor, width_scale_factor, height_scale_factor, video_vae, current_fps, disable_pbar, seed_number, wrap_callback):
             
             v_batch, v_channels, v_frames, v_height, v_width = v_samps.shape
             temp_tile_len = 48
@@ -1505,6 +1560,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                 input_dtype = v_tile.dtype
                 
                 upscaler_model.to(device_up)
+                # RESTORED: The LTXV upscaler strictly requires un-normalized latents!
                 v_tile_up = video_vae.first_stage_model.per_channel_statistics.un_normalize(v_tile.to(dtype=model_dtype, device=device_up))
                 v_tile_up = upscaler_model(v_tile_up)
                 upscaler_model.cpu()
@@ -1513,7 +1569,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                 print(f"\n--- {pass_name} Chunk {chunk_idx}/{num_chunks} (Dimensions: {v_tile_up.shape[4]*32}x{v_tile_up.shape[3]*32} | Shot {shot_idx+1}) ---")
                 
                 v_mask_tile = torch.ones((v_batch, v_tile_up.shape[2], v_tile_up.shape[3], v_tile_up.shape[4]), device=device, dtype=torch.float32)
-                
+
                 if final_pixels is not None and sp_encoded_t_local is None and not is_temporal:
                     t_width_sp = v_tile_up.shape[4] * width_scale_factor
                     t_height_sp = v_tile_up.shape[3] * height_scale_factor
@@ -1580,41 +1636,49 @@ Output only the prompt. Nothing before it, nothing after it."""
                         overlap_out_frames = overlap_in_frames
                         global_start = overlap_start
                         
-                    v_tile_up[:, :, :overlap_out_frames] = global_v_samps_up[:, :, global_start : global_start + overlap_out_frames]
                     feather = torch.linspace(0.0, 1.0, overlap_out_frames, device=device, dtype=torch.float32)
                     v_mask_tile[:, :overlap_out_frames, :, :] = feather.view(1, -1, 1, 1)
 
+                    if sigmas is None:
+                        prev_overlap = global_v_samps_up[:, :, global_start : global_start + overlap_out_frames]
+                        curr_overlap = v_tile_up[:, :, :overlap_out_frames]
+                        alpha = feather.view(1, 1, -1, 1, 1)
+                        v_tile_up[:, :, :overlap_out_frames] = prev_overlap * (1.0 - alpha) + curr_overlap * alpha
+                    else:
+                        v_tile_up[:, :, :overlap_out_frames] = global_v_samps_up[:, :, global_start : global_start + overlap_out_frames]
+
                 if is_temporal:
                     am_tile = a_mask_locked[:, :, a_start:a_end]
-                    a_tile_temporal = torch.repeat_interleave(a_tile, 2, dim=2)
-                    am_tile_temporal = torch.repeat_interleave(am_tile, 2, dim=2)
                     
                     current_latent_tile = {
-                        "samples": comfy.nested_tensor.NestedTensor((v_tile_up, a_tile_temporal)),
-                        "noise_mask": comfy.nested_tensor.NestedTensor((v_mask_tile.unsqueeze(1), am_tile_temporal)),
+                        "samples": comfy.nested_tensor.NestedTensor((v_tile_up, a_tile)),
+                        "noise_mask": comfy.nested_tensor.NestedTensor((v_mask_tile.unsqueeze(1), am_tile)),
                         "sample_rate": sampling_rate,
                         "type": "audio"
                     }
                 else:
                     am_tile = a_mask_locked[:, :, a_start:a_end]
                     current_latent_tile = {
-                        "samples": comfy.nested_tensor.NestedTensor((v_tile_up, am_tile)),
+                        "samples": comfy.nested_tensor.NestedTensor((v_tile_up, a_tile)),
                         "noise_mask": comfy.nested_tensor.NestedTensor((v_mask_tile.unsqueeze(1), am_tile)),
                         "sample_rate": sampling_rate,
                         "type": "audio"
                     }
                 
                 latent_image_tile = current_latent_tile["samples"]
-                
-                x0_output = {}
-                base_cb = latent_preview.prepare_callback(guider.model_patcher, sigmas.shape[-1] - 1, x0_output)
-                callback = wrap_callback(base_cb, pass_name)
-                
-                chunk_noise_seed = noise_seed + chunk_idx
-                chunk_noise_obj = Noise_RandomNoise(chunk_noise_seed)
-                
-                sampled_chunk = guider.sample(chunk_noise_obj.generate_noise(current_latent_tile), latent_image_tile, sampler, sigmas, denoise_mask=current_latent_tile["noise_mask"], callback=callback, disable_pbar=disable_pbar, seed=chunk_noise_seed)
-                sampled_v_tile = sampled_chunk.unbind()[0].to(device)
+
+                if sigmas is not None:
+                    x0_output = {}
+                    base_cb = latent_preview.prepare_callback(guider.model_patcher, sigmas.shape[-1] - 1, x0_output)
+                    callback = wrap_callback(base_cb, pass_name)
+
+                    chunk_seed_number = seed_number + chunk_idx
+                    chunk_noise_obj = Noise_RandomNoise(chunk_seed_number)
+                    
+                    sampled_chunk = guider.sample(chunk_noise_obj.generate_noise(current_latent_tile), latent_image_tile, sampler, sigmas, denoise_mask=current_latent_tile["noise_mask"], callback=callback, disable_pbar=disable_pbar, seed=chunk_seed_number)
+                    sampled_v_tile = sampled_chunk.unbind()[0].to(device)
+                else:
+                    sampled_v_tile = v_tile_up
 
                 if chunk_start == 0:
                     global_v_samps_up[:, :, :sampled_v_tile.shape[2]] = sampled_v_tile
@@ -1632,8 +1696,8 @@ Output only the prompt. Nothing before it, nothing after it."""
                 raise ValueError("Spatial upscaler model is required if sampling_stages > 1.")
             
             upsample_sampler = build_custom_sampler(upsample_sampler_name, eta, bongmath)
-            sigmas_list = re.findall(r"[-+]?(?:\d*\.*\d+)", upsample_manual_sigmas)
-            upsample_sigmas = torch.FloatTensor([float(i) for i in sigmas_list])
+            sigmas_list = re.findall(r"[-+]?(?:\d*\.*\d+)", spatial_sigmas)
+            spatial_sigmas = torch.FloatTensor([float(i) for i in sigmas_list])
 
             for stage in range(2, sampling_stages + 1):
                 v_samps, a_samps = sampled_tensor.unbind()
@@ -1643,9 +1707,9 @@ Output only the prompt. Nothing before it, nothing after it."""
                 global_v_samps_up = process_sliding_window_upscale(
                     pass_name=f"Spatial Upscale Pass {stage}",
                     is_temporal=False, v_samps=v_samps, a_samps=a_samps,
-                    upscaler_model=spatial_upscaler, guider=upsample_guider, sampler=upsample_sampler, sigmas=upsample_sigmas,
+                    upscaler_model=spatial_upscaler, guider=upsample_guider, sampler=upsample_sampler, sigmas=spatial_sigmas,
                     noise_obj=noise_obj, eta=eta, bongmath=bongmath, final_pixels=final_pixels, strengths=strengths,
-                    time_scale_factor=time_scale_factor, width_scale_factor=width_scale_factor, height_scale_factor=height_scale_factor, video_vae=video_vae, current_fps=current_fps, disable_pbar=disable_pbar, noise_seed=noise_seed, wrap_callback=wrap_callback
+                    time_scale_factor=time_scale_factor, width_scale_factor=width_scale_factor, height_scale_factor=height_scale_factor, video_vae=video_vae, current_fps=current_fps, disable_pbar=disable_pbar, seed_number=seed_number, wrap_callback=wrap_callback
                 )
 
                 sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samps_up, a_samps)).to(device)
@@ -1661,27 +1725,27 @@ Output only the prompt. Nothing before it, nothing after it."""
                 
             if sampling_stages == 1:
                 upsample_sampler = build_custom_sampler(upsample_sampler_name, eta, bongmath)
+                sigmas_list = re.findall(r"[-+]?(?:\d*\.*\d+)", str(spatial_sigmas))
+                spatial_sigmas = torch.FloatTensor([float(i) for i in sigmas_list])
 
-            temporal_sigmas = torch.FloatTensor([0.45, 0.25, 0.10, 0.0])
-            
+            t_sigmas_list = re.findall(r"[-+]?(?:\d*\.*\d+)", str(temporal_sigmas))
+            temporal_sigmas_tensor = torch.FloatTensor([float(i) for i in t_sigmas_list])
+            # temporal_sigmas_tensor = spatial_sigmas
+
             for i in range(len(final_positive)):
-                final_positive[i][1]["frame_rate"] = float(current_fps)
-                if "ref_audio" in final_positive[i][1]:
-                    tokens = final_positive[i][1]["ref_audio"]["tokens"]
-                    final_positive[i][1]["ref_audio"]["tokens"] = torch.repeat_interleave(tokens, 2, dim=1)
-                    
+                final_positive[i][1]["frame_rate"] = float(current_fps * 2)
+
             for i in range(len(final_negative)):
-                final_negative[i][1]["frame_rate"] = float(current_fps)
-                if "ref_audio" in final_negative[i][1]:
-                    tokens = final_negative[i][1]["ref_audio"]["tokens"]
-                    final_negative[i][1]["ref_audio"]["tokens"] = torch.repeat_interleave(tokens, 2, dim=1)
-            
+                final_negative[i][1]["frame_rate"] = float(current_fps * 2)
+
+            upsample_guider.set_cfg(temporal_cfg)
+
             global_v_samps_up = process_sliding_window_upscale(
                 pass_name="Temporal Upscale Pass",
                 is_temporal=True, v_samps=v_samps, a_samps=a_samps,
-                upscaler_model=temporal_upscaler, guider=upsample_guider, sampler=upsample_sampler, sigmas=temporal_sigmas,
+                upscaler_model=temporal_upscaler, guider=upsample_guider, sampler=upsample_sampler, sigmas=temporal_sigmas_tensor,
                 noise_obj=noise_obj, eta=eta, bongmath=bongmath, final_pixels=None, strengths=strengths,
-                time_scale_factor=time_scale_factor, width_scale_factor=width_scale_factor, height_scale_factor=height_scale_factor, video_vae=video_vae, current_fps=current_fps, disable_pbar=disable_pbar, noise_seed=noise_seed, wrap_callback=wrap_callback
+                time_scale_factor=time_scale_factor, width_scale_factor=width_scale_factor, height_scale_factor=height_scale_factor, video_vae=video_vae, current_fps=current_fps, disable_pbar=disable_pbar, seed_number=seed_number, wrap_callback=wrap_callback
             )
             
             sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samps_up, a_samps)).to(device)
@@ -2057,6 +2121,44 @@ Output only the prompt. Nothing before it, nothing after it."""
             print("--- Deep Cache Clearance Bypassed ---")
 
         return (final_prompt_string_out, final_latent, video_out_latent, audio_out_latent, out_video, out_image, out_audio, float(current_fps), out_ref_frame_count, node_id)
+
+# ==========================================
+# QUEUE INTERCEPTOR ("CONTROL BEFORE GENERATE")
+# ==========================================
+def trixope_on_prompt_handler(json_data):
+    try:
+        prompt = json_data.get("prompt", {})
+        seed_map = {}
+        for k, v in prompt.items():
+            if v.get("class_type") == "FilmAuteur_LTXV":
+                inputs = v.get("inputs", {})
+                
+                # Now the backend ACTUALLY receives your command!
+                control = inputs.get("control_before_generate", "randomize")
+
+                if control == "randomize":
+                    new_seed = random.randint(0, 0xffffffffffffffff)
+                    inputs["seed_number"] = new_seed
+                    seed_map[k] = new_seed
+                elif control == "increment":
+                    new_seed = inputs.get("seed_number", 0) + 1
+                    inputs["seed_number"] = new_seed
+                    seed_map[k] = new_seed
+                elif control == "decrement":
+                    new_seed = max(0, inputs.get("seed_number", 0) - 1)
+                    inputs["seed_number"] = new_seed
+                    seed_map[k] = new_seed
+                # If control == "fixed", we do absolutely nothing! The seed stays pristine.
+
+        if seed_map:
+            PromptServer.instance.send_sync("trixope-global-seed", {"seed_map": seed_map})
+            
+    except Exception as e:
+        print(f"LTXV Custom Error in prompt interceptor: {e}")
+        
+    return json_data
+
+PromptServer.instance.add_on_prompt_handler(trixope_on_prompt_handler)
 
 class LTXVPostSliceAV:
     @classmethod
