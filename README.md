@@ -31,8 +31,9 @@ Film Auteur (LTXV) - one node to rule them all!<br>
 (place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. <a href="https://huggingface.co/models? search=codeformer">codeformer</a>, <a href="https://huggingface.co/models?search=gfpgan">GFPGAN</a>, etc.))<br>
 - Built-in sageattention and fp16 accumulation (must be installed to use)<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
+- Unload models & clear cache<br>
 - Built in stage 1 preview<br>
-- Real-Time ETA counter (with assist node)
+- Internal Real-Time ETA counter (with assist node)
 
 Note: Refer to the tooltips for important information.<br><br>
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
