@@ -9,6 +9,6 @@ dependencies = ["Pillow", "numpy", "opencv-python-headless", "requests", "facexl
 Repository = "https://github.com/triXope/Comfyuio-triXope"
 
 [tool.comfy]
-PublisherId = "triXope"
+PublisherId = "trixope"
 DisplayName = "Comfyui-triXope"
 Icon = ""
