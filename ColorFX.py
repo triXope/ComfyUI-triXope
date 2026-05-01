@@ -54,21 +54,19 @@ class ColorFX:
         except Exception as e:
             print(f"Warning: Could not load LUT files for dropdown: {e}")
 
-
         return {
             "required": {
+                # --- MASTER BYPASS & STAGE TOGGLES ---
                 "images": ("IMAGE",),
-                "low_vram_mode": ("BOOLEAN", {"default": False}),
+                "enable": ("BOOLEAN", {"default": True}),
                 "enable_color_correction": ("BOOLEAN", {"default": True}),
                 "enable_lut_processing": ("BOOLEAN", {"default": True}),
                 "enable_enhancements": ("BOOLEAN", {"default": True}),
                 "enable_blur_effects": ("BOOLEAN", {"default": True}),
                 "enable_stylistic_effects": ("BOOLEAN", {"default": True}),
 
-                "lut_name": (lut_files, {"default": "None"}),
-                "lut_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "lut_log_process": ("BOOLEAN", {"default": True}),
-
+                # --- GROUP: Color Correction ---
+                "grp_color_correction": (["Color Correction"], {}),
                 "hdr_intensity": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 3.0, "step": 0.01}),
                 "shadow_intensity": ("FLOAT", {"default": 0.10, "min": 0.00, "max": 2.00, "step": 0.01}),
                 "highlight_intensity": ("FLOAT", {"default": 0.20, "min": 0.00, "max": 2.00, "step": 0.01}),
@@ -76,12 +74,22 @@ class ColorFX:
                 "brightness": ("FLOAT", {"default": 0.90, "min": 0.00, "max": 3.00, "step": 0.01}),
                 "contrast": ("FLOAT", {"default": 0.75, "min": 0.00, "max": 3.00, "step": 0.01}),
                 "saturation": ("FLOAT", {"default": 0.90, "min": 0.00, "max": 3.00, "step": 0.01}),
-
                 "enhance_color": ("FLOAT", {"default": 1.00, "min": 0.00, "max": 3.00, "step": 0.01}),
+
+                # --- GROUP: LUT Processing ---
+                "grp_lut": (["LUT Processing"], {}),
+                "lut_name": (lut_files, {"default": "None"}),
+                "lut_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "lut_log_process": ("BOOLEAN", {"default": True}),
+
+                # --- GROUP: Enhancements ---
+                "grp_enhancements": (["Enhancements"], {}),
                 "sharpness": ("FLOAT", {"default": 3.0, "min": -2.0, "max": 5.0, "step": 0.1}),
                 "edge_enhance_strength": ("FLOAT", {"default": 0.00, "min": 0.00, "max": 1.00, "step": 0.01}),
                 "detail_enhance_strength": ("FLOAT", {"default": 0.20, "min": 0.00, "max": 1.00, "step": 0.01}),
 
+                # --- GROUP: Blur Effects ---
+                "grp_blur": (["Blur Effects"], {}),
                 "blur_radius": ("INT", {"default": 0, "min": 0, "max": 64, "step": 1}),
                 "gaussian_blur_radius": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 64.0, "step": 0.1}),
                 "radial_blur_strength": ("FLOAT", {"default": 32.0, "min": 0.0, "max": 100.0, "step": 1.0}),
@@ -90,20 +98,19 @@ class ColorFX:
                 "radial_blur_focus_spread": ("FLOAT", {"default": 3.0, "min": 0.1, "max": 8.0, "step": 0.1}),
                 "radial_blur_steps": ("INT", {"default": 5, "min": 1, "max": 32, "step": 1}),
 
+                # --- GROUP: Stylistic Effects ---
+                "grp_stylistic": (["Stylistic Effects"], {}),
                 "chromatic_aberration_r_x": ("FLOAT", {"default": 1.0, "min": -50.0, "max": 50.0, "step": 0.5}),
                 "chromatic_aberration_r_y": ("FLOAT", {"default": 0.0, "min": -50.0, "max": 50.0, "step": 0.5}),
                 "chromatic_aberration_b_x": ("FLOAT", {"default": -1.0, "min": -50.0, "max": 50.0, "step": 0.5}),
                 "chromatic_aberration_b_y": ("FLOAT", {"default": 0.0, "min": -50.0, "max": 50.0, "step": 0.5}),
                 "chromatic_blur_amount": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 10.0, "step": 0.1}),
-
                 "simple_film_grain_intensity": ("FLOAT", {"default": 0.07, "min": 0.00, "max": 1.00, "step": 0.01}),
                 "simple_film_grain_monochrome": ("BOOLEAN", {"default": True}),
-
                 "scanline_intensity": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 1.0}),
                 "vignette_intensity": ("FLOAT", {"default": 1.00, "min": 0.00, "max": 1.00, "step": 0.01}),
                 "vignette_center_x": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 1.00, "step": 0.01}),
                 "vignette_center_y": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 1.00, "step": 0.01}),
-
                 "soft_light_opacity": ("FLOAT", {"default": 0.30, "min": 0.00, "max": 1.00, "step": 0.01}),
                 "soft_light_blur_radius": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 50.0, "step": 0.1}),
             },
@@ -370,7 +377,6 @@ class ColorFX:
         blur=pil_image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
         return Image.blend(pil_image,ImageChops.soft_light(pil_image,blur),opacity)
 
-    # --- NEW TORCH-BASED HELPER FUNCTIONS ---
     def _apply_gamma_torch(self, tensor_images, gamma_value):
         if gamma_value == 1.0: return tensor_images
         gamma_correction = 1.0 / max(gamma_value, 0.01)
@@ -396,16 +402,14 @@ class ColorFX:
         yy, xx = torch.meshgrid(Y, X, indexing='ij')
         
         dist = torch.sqrt(xx**2 + yy**2)
-        max_dist = torch.sqrt(torch.tensor(max(cx**2+cy**2,(W-cx)**2+cy**2,cx**2+(H-cy)**2,(w-cx)**2+(h-cy)**2), device=device))
+        max_dist = torch.sqrt(torch.tensor(max(cx**2+cy**2,(W-cx)**2+cy**2,cx**2+(H-cy)**2,(W-cx)**2+(H-cy)**2), device=device))
         
         v_mask = (1.0 - (dist / max(1.0, max_dist))**2 * intensity).clamp(0.0, 1.0)
         v_mask = v_mask.unsqueeze(0).unsqueeze(-1)
 
         return (tensor_images * v_mask).clamp(0.0, 1.0)
     
-    # --- MODIFIED: Main processing function with progress bar ---
-    def process_filters(self, images,
-                        low_vram_mode,
+    def process_filters(self, images, enable,
                         enable_color_correction, enable_lut_processing, enable_enhancements,
                         enable_blur_effects, enable_stylistic_effects,
                         lut_name, lut_strength, lut_log_process,
@@ -420,9 +424,14 @@ class ColorFX:
                         simple_film_grain_intensity, simple_film_grain_monochrome,
                         scanline_intensity,
                         vignette_intensity, vignette_center_x, vignette_center_y,
-                        soft_light_opacity, soft_light_blur_radius
+                        soft_light_opacity, soft_light_blur_radius, **kwargs
                         ):
-        
+
+        if not enable:
+            return (images,)
+
+        low_vram_mode = True 
+
         if low_vram_mode:
             print("INFO: ColorFX running in Low VRAM mode.")
             processed_images_tensors = []
