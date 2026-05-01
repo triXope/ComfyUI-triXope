@@ -3,7 +3,7 @@ class LTXV_ETA_Display:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "real_time_eta": ("ETA_TRACKER", {"forceInput": True, "tooltip": "Connect the real-time_eta output from FilmAuteur_LTXV here."}),
+                "real-time_eta": ("ETA_TRACKER", {"forceInput": True, "tooltip": "Connect the real-time_eta output from FilmAuteur_LTXV here."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"}
         }
@@ -13,7 +13,5 @@ class LTXV_ETA_Display:
     CATEGORY = "triXope"
     OUTPUT_NODE = True 
 
-    def display_eta(self, real_time_eta, unique_id=None):
-        # The Python backend doesn't actually need to do anything with this! 
-        # The frontend JavaScript intercepts the WebSocket and paints the UI based on the wire connection.
+    def display_eta(self, real-time_eta, unique_id=None):
         return ()
