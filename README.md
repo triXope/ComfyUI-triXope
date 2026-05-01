@@ -36,7 +36,7 @@ triXope Film Auteur (LTXV) - one node to rule them all! A complete production-re
 - Internal Real-Time ETA counter (with assist node)<br>
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
 
-triXope LTXV Real-Time ETA - assist node for Film Auteur (LTXV) to display the countdown timer<br><br>
+triXope LTXV Real-Time ETA - an assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br><br>
 
 triXope ColorFX - a post-processing suite featuring:<br>
 - Color Correction<br>
@@ -46,8 +46,7 @@ triXope ColorFX - a post-processing suite featuring:<br>
 - Blur Effects<br>
 - Stylistic Effects<br>
 
-
-Note: Refer to the tooltips for important information.<br><br>
+Note: Refer to the tooltips on each node for important information.<br><br>
 More nodes coming soon...<br>
 
 # Known Issues / Bugs
