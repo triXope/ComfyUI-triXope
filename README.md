@@ -12,7 +12,7 @@ At first glance, I'm sure the node looks overwhelming, with so much packed into 
 
 # Nodes
 
-Film Auteur (LTXV) - one node to rule them all!<br>
+triXope Film Auteur (LTXV) - one node to rule them all! A complete production-ready suite for LTX 2.3 featuring:<br>
 - Text-to-Video<br>
 - Image-to-Video<br>
 - Image Reference-to-Video (experimental work-in-progress)<br>
@@ -33,10 +33,21 @@ Film Auteur (LTXV) - one node to rule them all!<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
 - Unload models & clear cache<br>
 - Built in stage 1 preview<br>
-- Internal Real-Time ETA counter (with assist node)
+- Internal Real-Time ETA counter (with assist node)<br>
+Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
+
+triXope LTXV Real-Time ETA - assist node for Film Auteur (LTXV) to display the countdown timer<br><br>
+
+triXope ColorFX - a post-processing suite featuring:<br>
+- Color Correction<br>
+- Color Grading<br>
+- LUX Processing<br>
+- Color Enhancements<br>
+- Blur Effects<br>
+- Stylistic Effects<br>
+
 
 Note: Refer to the tooltips for important information.<br><br>
-Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
 More nodes coming soon...<br>
 
 # Known Issues / Bugs
