@@ -49,9 +49,6 @@ triXope ColorFX - a post-processing suite featuring:<br>
 Note: Refer to the tooltips on each node for important information.<br><br>
 More nodes coming soon...<br>
 
-# Known Issues / Bugs
-- Temporal upscaler is not working properly - it's a struggle of quality vs. timing<br>(eg. either clean hi-res output which breaks lip sync, or perfect lip sync with low quality output)
-
 # Installation
 ComfyUI Manager (recommended method)<br><br>
 Manual Method<br>
