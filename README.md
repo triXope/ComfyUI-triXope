@@ -38,7 +38,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
 
 <b>triXope LTXV Real-Time ETA:</b><br>
-An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
+- An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
 Note: This node is NOT highly accurate and is intended as an aid to provide a rough estimation of the total time it will take to complete a generation - more useful with longer generations.<br><br>
 
 <b>triXope ColorFX 🎬</b>
