@@ -12,7 +12,8 @@ At first glance, I'm sure the node looks overwhelming, with so much packed into 
 
 # Nodes
 
-triXope Film Auteur (LTXV) - one node to rule them all! A complete production-ready suite for LTX 2.3 featuring:<br>
+<b>triXope Film Auteur (LTXV)</b> - one node to rule them all!<br>
+A complete production-ready suite for LTX 2.3 featuring:<br>
 - Text-to-Video<br>
 - Image-to-Video<br>
 - Image Reference-to-Video (experimental work-in-progress)<br>
@@ -36,15 +37,22 @@ triXope Film Auteur (LTXV) - one node to rule them all! A complete production-re
 - Internal Real-Time ETA counter (with assist node)<br>
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
 
-triXope LTXV Real-Time ETA - an assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
+<b>triXope LTXV Real-Time ETA:</b><br>
+An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
 Note: This node is NOT highly accurate and is intended as an aid to provide a rough estimation of the total time it will take to complete a generation - more useful with longer generations.<br><br>
 
-triXope ColorFX - a post-processing suite featuring:<br>
+<b>triXope ColorFX 🎬</b>
+Post-processing suite featuring:<br>
 - Color Correction<br>
 - LUX Processing<br>
 - Color Enhancements<br>
 - Blur Effects<br>
 - Stylistic Effects<br>
+
+<b>triXope Directory File Selector 📂 (Live):</b><br>
+- Scrub local directory
+- Select file from list populated by selected directory
+- Output file path for further processing of audio, image, video, etc.
 
 Note: Refer to the tooltips on each node for important information.<br><br>
 More nodes coming soon...<br>
