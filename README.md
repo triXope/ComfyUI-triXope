@@ -64,3 +64,6 @@ Manual Method<br>
 1. cd custom_nodes<br>
 2. git clone https://github.com/triXope/ComfyUI-triXope.git<br>
 3. Restart ComfyUI<br>
+
+# Known Issues / Bugs
+- Temporal Upscaler is a work-in-progress and still not properly engaged.
