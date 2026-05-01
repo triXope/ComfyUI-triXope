@@ -70,14 +70,19 @@ app.registerExtension({
                     ctx.font = `bold ${etaFontSize * 0.8}px monospace`;
                     ctx.fillText("FINISHED", x + w/2, centerY - 5);
                 } else {
-                    ctx.font = `bold ${etaFontSize}px monospace`;
-                    
                     const seconds = Math.floor(this.etaMs / 1000);
-                    const h_str = Math.floor(seconds / 3600).toString().padStart(2, '0');
-                    const m_str = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
-                    const s_str = (seconds % 60).toString().padStart(2, '0');
                     
-                    ctx.fillText(`ETA ${h_str}:${m_str}:${s_str}`, x + w/2, centerY - 5);
+                    if (seconds <= 0) {
+                        ctx.font = `bold ${etaFontSize * 0.55}px monospace`;
+                        ctx.fillText("CALCULATING...", x + w/2, centerY - 5);
+                    } else {
+                        ctx.font = `bold ${etaFontSize}px monospace`;
+                        const h_str = Math.floor(seconds / 3600).toString().padStart(2, '0');
+                        const m_str = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+                        const s_str = (seconds % 60).toString().padStart(2, '0');
+                        
+                        ctx.fillText(`ETA ${h_str}:${m_str}:${s_str}`, x + w/2, centerY - 5);
+                    }
                 }
 
                 // Subtext / Current Pass
@@ -103,8 +108,11 @@ app.registerExtension({
                     node.etaMs = 0;
                     node.passText = "Initializing...";
                     node.statusText = "";
-                    
-                    // The Magic Link: Find the ID of the node connected to the input wire!
+
+                    node.stepTimes = []; 
+                    node.lastStepTimestamp = 0; 
+                    node.currentPassName = ""; 
+
                     node.target_ltxv_id = null;
                     if (node.inputs[0] && node.inputs[0].link) {
                         const link = app.graph.links[node.inputs[0].link];
@@ -129,6 +137,11 @@ app.registerExtension({
                             
                             app.graph._nodes.filter(n => n.type === "LTXV_ETA_Display").forEach(n => {
                                 n.elapsedStr = `${h}:${m}:${s}`;
+
+                                if (n.etaMs > 0 && n.overallProgress > 0 && n.overallProgress < 1.0) {
+                                    n.etaMs = Math.max(0, n.etaMs - 1000);
+                                }
+
                                 n.setDirtyCanvas(true, true); 
                             });
                         }
@@ -150,23 +163,42 @@ app.registerExtension({
 
                     const rawProgress = data.global_step / data.total_global_steps;
                     node.overallProgress = Math.min(rawProgress, 0.99);
-                    
-                    if (node.overallProgress > 0) {
+
+                    if (node.currentPassName !== data.pass_name) {
+                        node.stepTimes = []; 
+                        node.currentPassName = data.pass_name;
+                    } else if (node.lastStepTimestamp > 0) {
+                        const stepDuration = now - node.lastStepTimestamp;
+
+                        if (stepDuration < 60000) { 
+                            node.stepTimes.push(stepDuration);
+                        }
+
+                        if (node.stepTimes.length > 4) {
+                            node.stepTimes.shift();
+                        }
+                    }
+                    node.lastStepTimestamp = now;
+
+                    const remainingSteps = data.total_global_steps - data.global_step;
+
+                    if (node.stepTimes.length > 0) {
+                        const avgStepTime = node.stepTimes.reduce((a, b) => a + b, 0) / node.stepTimes.length;
+                        node.etaMs = avgStepTime * remainingSteps;
+                    } else if (node.etaMs === 0 && node.overallProgress > 0) {
                         const elapsed = now - globalStartTime;
                         const totalEstimated = elapsed / node.overallProgress;
                         node.etaMs = totalEstimated - elapsed;
                     }
 
-                    // Clamp the visual text so it never reads Global 21/20
                     const displayGlobal = Math.min(data.global_step, data.total_global_steps);
                     
                     if (data.chunk === data.total_chunks && data.step >= data.total_steps) {
                         node.passText = "UNet Diffusion Complete";
-                        // Dynamically switch the text based on the backend flag!
                         if (data.is_face_restore) {
-                            node.statusText = "Decoding VAE & Restoring Faces (Please Wait...)";
+                            node.statusText = "Decoding VAE & Restoring Faces...";
                         } else {
-                            node.statusText = "Decoding VAE (Please Wait...)";
+                            node.statusText = "Decoding VAE...";
                         }
                     } else {
                         node.passText = `${data.pass_name} (Chunk ${data.chunk} of ${data.total_chunks})`;
@@ -177,7 +209,6 @@ app.registerExtension({
                 });
             });
 
-            // This native ComfyUI event fires when the ENTIRE Python node finishes (including VAE & Faces)
             api.addEventListener("executing", (event) => {
                 if (!event.detail) {
                     isExecuting = false; 
