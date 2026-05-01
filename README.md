@@ -39,7 +39,8 @@ Just plug in your models, optional reference images and/or audio, set your desir
 
 <b>triXope LTXV Real-Time ETA:</b><br>
 - An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
-Note: This node is NOT highly accurate and is intended as an aid to provide a rough estimation of the total time it will take to complete a generation - more useful with longer generations.<br><br>
+Note: This node is NOT precise and is intended as an aid to provide a rough estimation of the total time it will take to complete a generation - more useful with longer generations.<br>
+The node is not a high priority, but I am open to suggestions for improving the accuracy.<br><br>
 
 <b>triXope ColorFX 🎬</b>
 Post-processing suite featuring:<br>
