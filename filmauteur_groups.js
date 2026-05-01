@@ -81,7 +81,7 @@ app.registerExtension({
                     { btnName: "grp_prompting", label: "Prompting", widgets: ["character_descriptions", "location_description", "scene_descriptions", "use_ollama", "ollama_url", "ollama_model"] },
                     { btnName: "grp_specs", label: "Video Specs", widgets: ["seed_number", "control_before_generate", "target_width", "target_height", "length_in_seconds", "frame_rate"] },
                     { btnName: "grp_sampling", label: "Sampling", widgets: ["sampling_stages", "primary_sampler_name", "primary_cfg", "primary_steps", "upsample_sampler_name", "spatial_cfg", "spatial_sigmas", "eta", "bongmath", "enable_nag", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds"] },
-                    { btnName: "grp_refinement", label: "Refinement", widgets: ["temporal_upscale", "temporal_cfg", "temporal_sigmas", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
+                    { btnName: "grp_refinement", label: "Refinement", widgets: ["temporal_upscale", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
                     { btnName: "grp_performance", label: "Performance", widgets: ["enable_fp16_accumulation", "sage_attention", "chunks", "clear_models_and_cache"] },
                     { btnName: "grp_preview", label: "Preview", widgets: ["enable_preview", "stage1_preview"] }
                 ];
@@ -110,8 +110,7 @@ app.registerExtension({
                     "autoregressive_chunking": "Automatically flush VRAM and outpaint the video in chunks if the length exceeds the chunk size.",
                     "chunk_size_seconds": "The max duration (in seconds) generated in a single pass before flushing VRAM.",
                     "context_window_seconds": "Seconds of previous video the model can 'see'. Caps render time! Set equal to chunk_size to keep rendering times perfectly flat.",
-                    "temporal_upscale": "Triggers the temporal upscaler on or off (use to double the input frame rate, thus doubling the frame count, and refine the final video, cleaning up artifacts).",
-                    "temporal_cfg": "Classifier Free Guidance specifically for the temporal cleanup pass. Lower values (0.8 - 1.2) help reduce blotchy artifacts during the low-noise schedule.",
+                    "temporal_upscale": "Triggers the temporal upscaler on or off (use to double the input frame rate, thus doubling the frame count, and refine the final video, cleaning up artifacts, enhancing details, and improving overall quality).",
                     "restore_faces": "Apply CodeFormer face restoration to all frames. Requires a valid model selected below.",
                     "facerestore_model": "Select the CodeFormer Face Restore Model.",
                     "facedetection": "Face detection model.",
