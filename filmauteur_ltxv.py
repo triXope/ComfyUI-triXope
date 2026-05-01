@@ -416,7 +416,7 @@ class FilmAuteur_LTXV:
         }
 
     RETURN_TYPES = ("STRING", "LATENT", "LATENT", "LATENT", "VIDEO", "IMAGE", "AUDIO", "FLOAT", "INT", "ETA_TRACKER")
-    RETURN_NAMES = ("text_prompt(s)", "av_latent", "video_latent", "audio_latent", "video", "images", "audio", "fps", "ref_frame_count", "real-time_eta")
+    RETURN_NAMES = ("text_prompt(s)", "av_latent", "video_latent", "audio_latent", "video", "images", "audio", "fps", "ref_frame_count", "real_time_eta")
     FUNCTION = "process"
     CATEGORY = "triXope"
 
