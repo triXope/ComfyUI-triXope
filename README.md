@@ -41,7 +41,6 @@ Note: This node is NOT highly accurate and is intended as an aid to provide a ro
 
 triXope ColorFX - a post-processing suite featuring:<br>
 - Color Correction<br>
-- Color Grading<br>
 - LUX Processing<br>
 - Color Enhancements<br>
 - Blur Effects<br>
