@@ -27,7 +27,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - LTXV Add Guide & LTX Add Video IC-LoRA Guide fully implemented under the hood for added control & consistency over reference images<br>
 - Inifinite (truly) length by use of autoregressive chunking and built-in sliding context windows<br>
 - Base sampling plus up to 2 spatial upscale passes (model2_spatial input optional)<br>
-- Temporal upscaling option (effortlessly doubles the framerate)<br>
+- Temporal upscaling option (doubles the framerate and improves motion, lip sync, and visual fidelity)<br>
 - Face restoration to help with cleaning up faces and removing artifacts<br>
 (place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. <a href="https://huggingface.co/models? search=codeformer">codeformer</a>, <a href="https://huggingface.co/models?search=gfpgan">GFPGAN</a>, etc.))<br>
 - Built-in sageattention and fp16 accumulation (must be installed to use)<br>
