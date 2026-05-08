@@ -386,6 +386,7 @@ class FilmAuteur_LTXV:
                 "spatial_cfg": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
                 "spatial_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
                 "temporal_upscale": ("BOOLEAN", {"default": False}),
+                "temporal_denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
                 "restore_faces": ("BOOLEAN", {"default": False}),
                 "facerestore_model": (get_trixope_facerestore_models(), {}),
                 "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"], {}),
@@ -428,7 +429,7 @@ class FilmAuteur_LTXV:
                 primary_sampler_name, primary_cfg, primary_steps,
                 eta, bongmath, enable_nag,
                 autoregressive_chunking, chunk_size_seconds, context_window_seconds, 
-                spatial_upscale, spatial_passes, spatial_sampler, spatial_cfg, spatial_sigmas, temporal_upscale,
+                spatial_upscale, spatial_passes, spatial_sampler, spatial_cfg, spatial_sigmas, temporal_upscale, temporal_denoise,
                 restore_faces, facerestore_model, facedetection, codeformer_fidelity,
                 face_restore_color_match, face_restore_edge_blur, face_restore_blend,
                 enable_fp16_accumulation, sage_attention, chunks, clear_models_and_cache, enable_preview,
@@ -2003,10 +2004,10 @@ Output only the prompt. Nothing before it, nothing after it."""
                 # 2. Setup the Sampler & Scheduler
                 temporal_sampler = comfy.samplers.sampler_object("euler_cfg_pp")
                 temporal_model_sampling = temporal_model.get_model_object("model_sampling")
-                
-                # 3. Exact KSampler Math (4 Steps @ 0.25 Denoise)
+
+                # 3. Exact KSampler Math (4 Steps)
                 node_steps = 4
-                node_denoise = 0.25
+                node_denoise = temporal_denoise
                 total_schedule_steps = int(node_steps / node_denoise)
                 total_sigmas = comfy.samplers.calculate_sigmas(temporal_model_sampling, "linear_quadratic", total_schedule_steps)
                 temporal_sigmas_tensor = total_sigmas[-(node_steps + 1):].to(device)
