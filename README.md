@@ -22,7 +22,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Ollama integration for prompt enhancement (Gemma 4 26b recommended)<br>
 - Normalized Attention Guidance (NAG) integration for negative prompting with low CFG
 - Length input as seconds (calculated & converted to frame count internally based on fps)<br>
-- Multi-shot inferencing using "|" separators between prompts<br>
+- Integrated "Director Mode" with multi-shot inferencing using "|" separators between prompts<br>
 - Image input accepts image batch for storyboard processing (1 shot per image coinciding with multi-prompt input) or reference images<br>
 - LTXV Add Guide & LTX Add Video IC-LoRA Guide fully implemented under the hood for added control & consistency over reference images<br>
 - Inifinite (truly) length by use of autoregressive chunking and built-in sliding context windows<br>
