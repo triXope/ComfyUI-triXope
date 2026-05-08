@@ -81,7 +81,7 @@ app.registerExtension({
                     { btnName: "grp_prompting", label: "Prompting", widgets: ["character_descriptions", "location_description", "scene_descriptions", "use_ollama", "ollama_url", "ollama_model"] },
                     { btnName: "grp_specs", label: "Video Specs", widgets: ["seed_number", "control_before_generate", "target_width", "target_height", "length_in_seconds", "frame_rate"] },
                     { btnName: "grp_sampling", label: "Primary Sampling", widgets: ["primary_sampler_name", "primary_cfg", "primary_steps", "eta", "bongmath", "enable_nag", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds"] },
-                    { btnName: "grp_refinement", label: "Upscale & Refine", widgets: ["spatial_upscale", "spatial_passes", "spatial_sampler", "spatial_cfg", "spatial_sigmas", "temporal_upscale", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
+                    { btnName: "grp_refinement", label: "Upscale & Refine", widgets: ["spatial_upscale", "spatial_passes", "spatial_sampler", "spatial_cfg", "spatial_sigmas", "temporal_upscale", "temporal_denoise", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
                     { btnName: "grp_performance", label: "Performance", widgets: ["enable_fp16_accumulation", "sage_attention", "chunks", "clear_models_and_cache"] },
                     { btnName: "grp_preview", label: "Preview", widgets: ["enable_preview", "stage1_preview"] }
                 ];
@@ -112,6 +112,7 @@ app.registerExtension({
                     "spatial_upscale": "Enable spatial upscaling to increase resolution.",
                     "spatial_passes": "Number of upscaling stages. 1 = One 2x upscale pass, 2 = Two 2x upscale passes (4x total resolution boost).",
                     "temporal_upscale": "[TEMPORARILY DISABLED] Triggers the temporal upscaler on or off.",
+                    "temporal_denoise": "Use a low denoise value between 0.15 and 0.35 for optimal temporal upscaling results.",
                     "restore_faces": "Apply CodeFormer face restoration to all frames. Requires a valid model selected below.",
                     "facerestore_model": "Select the CodeFormer Face Restore Model.",
                     "facedetection": "Face detection model.",
