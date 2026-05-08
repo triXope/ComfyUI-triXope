@@ -1879,8 +1879,10 @@ Output only the prompt. Nothing before it, nothing after it."""
             # ---------------------------------------------------------
             # 3. SLIDING WINDOW SETUP
             # ---------------------------------------------------------
-            temp_tile_len = 48
-            temp_overlap = 8
+            user_tile_len = max(8, int((chunk_size_seconds * current_fps) / 8))
+            temp_tile_len = min(user_tile_len, 16) 
+            temp_overlap = max(2, temp_tile_len // 4)
+            
             global_v_temporal = torch.zeros((v_batch, v_channels, total_out_frames, v_height, v_width), device=device, dtype=final_video_samples.dtype)
 
             sim_start = 0
