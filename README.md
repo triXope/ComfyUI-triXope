@@ -34,17 +34,17 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
 - Unload models & clear cache<br>
 - Built in stage 1 preview<br>
-- Internal Real-Time ETA counter (with assist node)<br><br>
+- Internal Real-Time ETA counter (with assist node)<br>
 
-Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br><br>
+Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br>
 
 Road Map (upcoming features):<br>
 - Prompt Relay<br>
 - Keyframes (first, middle, last frame, etc.)<br>
-
+<br>
 <b>triXope LTXV Real-Time ETA:</b><br>
-- An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br><br>
-
+- An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
+<br>
 <b>triXope ColorFX 🎬</b>
 Post-processing suite featuring:<br>
 - Color Correction<br>
