@@ -52,7 +52,7 @@ Post-processing suite featuring:<br>
 - Color Enhancements<br>
 - Blur Effects<br>
 - Stylistic Effects<br>
-
+<br>
 <b>triXope Directory File Selector 📂 (Live):</b><br>
 - Scrub local directory
 - Select file from list populated by selected directory
