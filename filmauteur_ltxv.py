@@ -2635,20 +2635,23 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # 9. VRAM CLEANUP
         # ==========================================
-        if model_to_use is not None:
-            model_to_use.unpatch_model()
-            if hasattr(model_to_use, "object_patches"): model_to_use.object_patches.clear()
-            if hasattr(model_to_use, "model_options"): model_to_use.model_options.clear()
-            
+        def safe_clear_model(m):
+            if m is not None:
+                m.unpatch_model()
+                # Break circular patches safely without destroying the dictionary structure
+                if hasattr(m, "object_patches"): 
+                    m.object_patches.clear()
+                if hasattr(m, "model_options") and "transformer_options" in m.model_options:
+                    # Surgically remove only our injected SageAttention override to prevent memory leaks
+                    m.model_options["transformer_options"].pop("optimized_attention_override", None)
+
+        safe_clear_model(model_to_use)
+        
         if model2_to_use is not None and model2_to_use is not model_to_use:
-            model2_to_use.unpatch_model()
-            if hasattr(model2_to_use, "object_patches"): model2_to_use.object_patches.clear()
-            if hasattr(model2_to_use, "model_options"): model2_to_use.model_options.clear()
+            safe_clear_model(model2_to_use)
             
         if model3_to_use is not None and model3_to_use is not model_to_use and model3_to_use is not model2_to_use:
-            model3_to_use.unpatch_model()
-            if hasattr(model3_to_use, "object_patches"): model3_to_use.object_patches.clear()
-            if hasattr(model3_to_use, "model_options"): model3_to_use.model_options.clear()
+            safe_clear_model(model3_to_use)
 
         del model1_primary
         del model_to_use
