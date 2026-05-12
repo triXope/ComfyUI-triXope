@@ -41,6 +41,7 @@ Just plug in your models, optional reference images and/or audio, set your desir
 Road Map (upcoming features):<br>
 - Prompt Relay<br>
 - Keyframes (first, middle, last frame, etc.)<br>
+- RTX Super Resolution upscaler<br>
 <br>
 <b>triXope LTXV Real-Time ETA:</b><br>
 - An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
