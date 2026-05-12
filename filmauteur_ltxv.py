@@ -2324,7 +2324,7 @@ Output only the prompt. Nothing before it, nothing after it."""
             
             if restore_faces and facerestore_model != "None":
                 try:
-                    from facelib.utils.face_restoration_helper import FaceRestoreHelper
+                    from facexlib.utils.face_restoration_helper import FaceRestoreHelper
                     from torchvision.transforms.functional import normalize
                     from basicsr.utils.registry import ARCH_REGISTRY
                     from comfy_extras.chainner_models import model_loading
