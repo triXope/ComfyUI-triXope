@@ -329,7 +329,7 @@ class FilmAuteur_LTXV:
     @classmethod
     def INPUT_TYPES(cls):
         sampler_names = comfy.samplers.SAMPLER_NAMES
-        primary_default = "euler" if "euler" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
+        primary_default = "res_2s" if "res_2s" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
         upsample_default = "euler_cfg_pp" if "euler_cfg_pp" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
 
         return {
@@ -371,12 +371,9 @@ class FilmAuteur_LTXV:
                 "primary_sampler_name": (sampler_names, {"default": primary_default}),
                 "primary_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
                 "primary_steps": ("STRING", {"multiline": False, "default": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.881203, 0.863321, 0.841251, 0.820089, 0.655, 0.381875, 0.0"}),
-                "eta": ("FLOAT", {"default": 0.5, "min": -100.0, "max": 100.0, "step": 0.01, "round": False}),
+                "eta": ("FLOAT", {"default": 0.95, "min": -100.0, "max": 100.0, "step": 0.01, "round": False}),
                 "bongmath": ("BOOLEAN", {"default": True}),
                 "enable_nag": ("BOOLEAN", {"default": True}),
-                "autoregressive_chunking": ("BOOLEAN", {"default": True}),
-                "chunk_size_seconds": ("FLOAT", {"default": 30.0, "min": 5.0, "max": 300.0, "step": 1.0}),
-                "context_window_seconds": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 300.0, "step": 1.0}),
 
                 # --- GROUP: Upscale & Refine ---
                 "grp_refinement": (["▼ Upscale & Refine"], {}),
@@ -385,7 +382,7 @@ class FilmAuteur_LTXV:
                 "spatial_sampler": (sampler_names, {"default": upsample_default}),
                 "spatial_cfg": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
                 "spatial_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
-                "temporal_upscale": ("BOOLEAN", {"default": False}),
+                "temporal_upscale": ("BOOLEAN", {"default": True}),
                 "temporal_denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
                 "restore_faces": ("BOOLEAN", {"default": False}),
                 "facerestore_model": (get_trixope_facerestore_models(), {}),
@@ -397,9 +394,12 @@ class FilmAuteur_LTXV:
 
                 # --- GROUP: Performance ---
                 "grp_performance": (["▼ Performance"], {}),
-                "enable_fp16_accumulation": ("BOOLEAN", {"default": False}),
+                "enable_fp16_accumulation": ("BOOLEAN", {"default": True}),
                 "sage_attention": (sageattn_modes, {"default": "disabled"}),
-                "chunks": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1}),
+                "autoregressive_chunking": ("BOOLEAN", {"default": True}),
+                "chunk_size_seconds": ("FLOAT", {"default": 20.0, "min": 5.0, "max": 300.0, "step": 1.0}),
+                "context_window_seconds": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 300.0, "step": 1.0}),
+                "chunks_feedforward": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1}),
                 "clear_models_and_cache": ("BOOLEAN", {"default": True}),
 
                 # --- GROUP: Preview ---
@@ -428,11 +428,10 @@ class FilmAuteur_LTXV:
                 seed_number, control_before_generate, target_width, target_height, length_in_seconds, frame_rate,
                 primary_sampler_name, primary_cfg, primary_steps,
                 eta, bongmath, enable_nag,
-                autoregressive_chunking, chunk_size_seconds, context_window_seconds, 
                 spatial_upscale, spatial_passes, spatial_sampler, spatial_cfg, spatial_sigmas, temporal_upscale, temporal_denoise,
                 restore_faces, facerestore_model, facedetection, codeformer_fidelity,
                 face_restore_color_match, face_restore_edge_blur, face_restore_blend,
-                enable_fp16_accumulation, sage_attention, chunks, clear_models_and_cache, enable_preview,
+                enable_fp16_accumulation, sage_attention, autoregressive_chunking, chunk_size_seconds, context_window_seconds, chunks_feedforward, clear_models_and_cache, enable_preview,
                 model2_spatial=None, spatial_upscaler=None, model3_temporal=None, temporal_upscaler=None,
                 images=None, audio=None, unique_id=None, **kwargs):
 
@@ -506,8 +505,6 @@ class FilmAuteur_LTXV:
 
         tm_chunks = 0
         tm_steps = 0
-        #tm_chunks = count_sliding_chunks(latent_frames_base) if temporal_upscale else 0
-        #tm_steps = 3 if temporal_upscale else 0 
 
         total_chunks = base_chunks + sp_chunks + tm_chunks
         total_global_steps = (base_chunks * (base_steps + 1)) + (sp_chunks * sp_steps) + (tm_chunks * tm_steps)
@@ -833,16 +830,21 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # 3. EXACT FRAME MATH & BASE LATENT GENERATION
         # ==========================================
-        b = length_in_seconds
-
+        shot_seconds = length_in_seconds / num_prompts
+        
         if not bypass_img_ref:
-            raw_frame_length = (a * duplicate_frames) + (b * current_fps) + 9
+            raw_frames_per_shot = (a * duplicate_frames) + (shot_seconds * current_fps) + 9
         else:
-            raw_frame_length = (b * current_fps) + 1
+            raw_frames_per_shot = (shot_seconds * current_fps) + 1
             
-        latent_count = int(((raw_frame_length - 1) // 8) + 1)
-        if latent_count < 1: latent_count = 1
-        frame_length = int(((latent_count - 1) * 8) + 1)
+        latents_per_shot = int(((raw_frames_per_shot - 1) // 8) + 1)
+        if latents_per_shot < 1: latents_per_shot = 1
+        
+        frames_per_shot = int(((latents_per_shot - 1) * 8) + 1)
+        
+        # Multiply by num_prompts to allocate perfectly segregated blocks
+        latent_count = latents_per_shot * num_prompts
+        frame_length = frames_per_shot * num_prompts
         
         device = comfy.model_management.intermediate_device()
         batch_size = 1 
@@ -881,16 +883,24 @@ Output only the prompt. Nothing before it, nothing after it."""
         # 3.4 HELPER: LATENT COUNTER
         # ==========================================
         def get_latent_counts(sec):
-            if bypass_img_ref:
-                raw_frames = int((sec * current_fps) + 1)
-            else:
-                raw_frames = int((a * duplicate_frames) + (sec * current_fps) + 9)
+            # Map continuous seconds to our isolated shot blocks!
+            shot_idx = int(sec // shot_seconds)
+            if shot_idx >= num_prompts:
+                shot_idx = num_prompts - 1
                 
-            v_lat = int(((raw_frames - 1) // 8) + 1)
-            if v_lat < 1: v_lat = 1
+            remainder_sec = sec - (shot_idx * shot_seconds)
+            
+            if bypass_img_ref:
+                raw_frames = int((remainder_sec * current_fps) + 1)
+            else:
+                raw_frames = int((a * duplicate_frames) + (remainder_sec * current_fps) + 9)
+                
+            local_v_lat = int(((raw_frames - 1) // 8) + 1)
+            if local_v_lat < 1: local_v_lat = 1
+            
+            v_lat = (shot_idx * latents_per_shot) + local_v_lat
             
             synced_frames = int(((v_lat - 1) * 8) + 1)
-            
             get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
             a_lat = get_audio_latents_func(synced_frames, int(current_fps))
             return v_lat, a_lat
@@ -1059,15 +1069,17 @@ Output only the prompt. Nothing before it, nothing after it."""
                 model_to_use.add_callback(comfy.patcher_extension.CallbacksMP.ON_PRE_RUN, patch_disable_fp16_accum)
 
         if sage_attention != "disabled":
+            model_to_use.model_options["transformer_options"] = model_to_use.model_options.get("transformer_options", {}).copy()
+            
             new_attention = get_sage_func(sage_attention)
             def attention_override_sage(func, *args, **kwargs):
                 return new_attention.__wrapped__(*args, **kwargs)
             model_to_use.model_options["transformer_options"]["optimized_attention_override"] = attention_override_sage
 
         dim_threshold = 4096
-        if chunks > 1:
+        if chunks_feedforward > 1:
             for idx, block in enumerate(diffusion_model.transformer_blocks):
-                patched_ffn = LTXVffnChunkPatch(chunks, dim_threshold).__get__(block.ff, block.__class__)
+                patched_ffn = LTXVffnChunkPatch(chunks_feedforward, dim_threshold).__get__(block.ff, block.__class__)
                 model_to_use.add_object_patch(f"diffusion_model.transformer_blocks.{idx}.ff.forward", patched_ffn)
         
         # --- HARDCODED NORMALIZED ATTENTION GUIDANCE (NAG) ---
@@ -1271,88 +1283,215 @@ Output only the prompt. Nothing before it, nothing after it."""
             sigmas[non_zero_mask] = stretched
             primary_sigmas = sigmas
 
-        if not autoregressive_chunking or length_in_seconds <= chunk_size_seconds:
-            primary_guider.set_conds([final_positive[0]], final_negative)
+        # ==========================================
+        # 6.5 UNIFIED AUTOREGRESSIVE & ISOLATED SAMPLING LOOP
+        # ==========================================
+        print(f"\n--- Base Generation Active: Building {num_prompts} Isolated Shot(s) ---")
+        isolated_v_shots = []
+        isolated_a_shots = []
+        
+        shot_duration = length_in_seconds / num_prompts
+        
+        # 0-Indexed local timeline mappers
+        def sec_to_v_idx(sec):
+            if sec <= 0.0: return 0
+            frames = int(sec * current_fps) + 1 if bypass_img_ref else int(a * duplicate_frames) + int(sec * current_fps) + 9
+            return ((frames - 1) // 8) + 1
             
-            av_samples = comfy.nested_tensor.NestedTensor((video_samples, audio_samples))
-            av_noise_mask = comfy.nested_tensor.NestedTensor((video_noise_mask.unsqueeze(1), audio_noise_mask))
-            current_latent = {"samples": av_samples, "noise_mask": av_noise_mask, "sample_rate": sampling_rate, "type": "audio"}
-            latent_image = current_latent["samples"]
-            
-            x0_output = {}
-            base_cb = latent_preview.prepare_callback(primary_guider.model_patcher, primary_sigmas.shape[-1] - 1, x0_output)
-            callback = wrap_callback(base_cb, "Base Generation")
+        def sec_to_a_idx(sec):
+            if sec <= 0.0: return 0
+            frames = int(sec * current_fps) + 1 if bypass_img_ref else int(a * duplicate_frames) + int(sec * current_fps) + 9
+            synced_frames = int(((((frames - 1) // 8) + 1) - 1) * 8) + 1
+            get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
+            return get_audio_latents_func(synced_frames, int(current_fps))
 
-            print(f"\n--- Running Autoregressive Pass 1/1 (Dimensions: {initial_width}x{initial_height}) ---")
-            sampled_tensor = primary_guider.sample(noise_obj.generate_noise(current_latent), latent_image, primary_sampler, primary_sigmas, denoise_mask=av_noise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
-            sampled_tensor = sampled_tensor.to(device)
+        v_len = sec_to_v_idx(shot_duration)
+        a_len = sec_to_a_idx(shot_duration)
+        
+        x0_output = {}
+        for s in range(num_prompts):
+            shot_start_sec = s * shot_duration
+            shot_end_sec = (s + 1) * shot_duration
             
-        else:
-            global_v_samples = video_samples
-            global_a_samples = audio_samples
-            global_v_masks = video_noise_mask.unsqueeze(1) 
-            global_a_masks = audio_noise_mask
+            # Simulate the chunking math to get the exact total chunks for this shot
+            total_chunks_in_shot = 0
+            temp_sec = shot_start_sec
+            while temp_sec < shot_end_sec:
+                total_chunks_in_shot += 1
+                if not autoregressive_chunking:
+                    temp_sec = shot_end_sec
+                else:
+                    temp_sec = min(temp_sec + chunk_size_seconds, shot_end_sec)
             
-            shot_duration = length_in_seconds / num_prompts
-            curr_sec = 0.0
+            print(f"\n-> Generating Isolated Shot {s+1}/{num_prompts} (Total Chunks: {total_chunks_in_shot})...")
             
-            x0_output = {}
-            for s in range(num_prompts):
-                shot_start_sec = s * shot_duration
-                shot_end_sec = (s + 1) * shot_duration
-                
-                while curr_sec < shot_end_sec:
-                    comfy.model_management.soft_empty_cache()
-                    chunk_start_sec = curr_sec
-                    curr_sec = min(chunk_start_sec + chunk_size_seconds, shot_end_sec)
-                    
-                    curr_v_latents, curr_a_latents = get_latent_counts(curr_sec)
-                    prev_v_latents, prev_a_latents = get_latent_counts(chunk_start_sec)
-                    
-                    primary_guider.set_conds([final_positive[s]], final_negative)
-                    
-                    if chunk_start_sec == shot_start_sec:
-                        context_start_sec = chunk_start_sec
-                        print(f"\n--- Director Mode: Action! Generating Shot {s+1}/{num_prompts} (0.0s to {curr_sec - chunk_start_sec:.2f}s) ---")
-                    else:
-                        context_start_sec = max(shot_start_sec, chunk_start_sec - context_window_seconds)
-                        print(f"\n--- Extending Shot {s+1}: Generating {chunk_start_sec - shot_start_sec:.2f}s to {curr_sec - shot_start_sec:.2f}s (Context Lookback: {chunk_start_sec - context_start_sec:.2f}s) ---")
+            # Map absolute global latents to determine exact local length
+            base_v_lat, base_a_lat = get_latent_counts(shot_start_sec)
+            end_v_lat, end_a_lat = get_latent_counts(shot_end_sec)
+            
+            v_len = end_v_lat - base_v_lat
+            a_len = end_a_lat - base_a_lat
+            
+            # 1. Create a pristine, empty latent block for this specific shot
+            pass_v_samples = torch.zeros([batch_size, 128, v_len, initial_height // 32, initial_width // 32], device=device)
+            pass_v_samples = comfy.sample.fix_empty_latent_channels(model1_primary, pass_v_samples, None)
+            pass_v_masks = torch.ones_like(pass_v_samples)
+            
+            pass_a_samples = torch.zeros([batch_size, z_channels, a_len, audio_freq], device=device)
+            pass_a_masks = torch.ones_like(pass_a_samples)
+            
+            # 2. Inject Reference Images uniquely into this shot's slot
+            if s == 0 and final_pixels is not None:
+                encoded_t = video_vae.encode(final_pixels[:, :, :, :3])
+                frames_to_inject = min(encoded_t.shape[2], pass_v_samples.shape[2])
+                pass_v_samples[:, :, :frames_to_inject] = encoded_t[:, :, :frames_to_inject]
+                for i in range(frames_to_inject):
+                    pixel_idx = min(i * time_scale_factor, max(0, len(strengths) - 1))
+                    pass_v_masks[:, i, :, :] = 1.0 - strengths[pixel_idx]
+            elif first_frame is not None and not bypass_first_frame:
+                img_idx = min(s, first_frame.shape[0] - 1)
+                img = first_frame[img_idx:img_idx+1]
+                img_scaled = comfy.utils.common_upscale(img.movedim(-1, 1), t_width, t_height, "bilinear", "center").movedim(1, -1)
+                encoded_img = video_vae.encode(img_scaled[:, :, :, :3]).to(device)
+                inject_len = min(encoded_img.shape[2], pass_v_samples.shape[2])
+                if inject_len > 0:
+                    pass_v_samples[:, :, :inject_len] = encoded_img[:, :, :inject_len]
+                    for j in range(inject_len):
+                        pass_v_masks[:, j, :, :] = 1.0 - first_frame_str
                         
-                    ctx_v_latents, ctx_a_latents = get_latent_counts(context_start_sec)
-                    
-                    if chunk_start_sec > shot_start_sec:
-                        global_v_masks[:, :, ctx_v_latents:prev_v_latents] = 0.0
-                        global_a_masks[:, :, ctx_a_latents:prev_a_latents] = 0.0
-                    
-                    pass_v_samples = global_v_samples[:, :, ctx_v_latents:curr_v_latents]
-                    pass_a_samples = global_a_samples[:, :, ctx_a_latents:curr_a_latents]
-                    pass_v_masks = global_v_masks[:, :, ctx_v_latents:curr_v_latents]
-                    pass_a_masks = global_a_masks[:, :, ctx_a_latents:curr_a_latents]
-                    
-                    av_samples = comfy.nested_tensor.NestedTensor((pass_v_samples, pass_a_samples))
-                    av_masks = comfy.nested_tensor.NestedTensor((pass_v_masks, pass_a_masks))
-                    
-                    current_latent = {"samples": av_samples, "noise_mask": av_masks, "sample_rate": sampling_rate, "type": "audio"}
-                    latent_image = current_latent["samples"]
-                        
-                    base_cb = latent_preview.prepare_callback(primary_guider.model_patcher, primary_sigmas.shape[-1] - 1, x0_output)
-                    callback = wrap_callback(base_cb, f"Base Shot {s+1}")
-                    sampled_chunk = primary_guider.sample(noise_obj.generate_noise(current_latent), latent_image, primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
-                    
-                    unbound = sampled_chunk.unbind()
-                    res_v = unbound[0].to(device)
-                    res_a = unbound[1].to(device)
-                    
-                    if context_start_sec == chunk_start_sec:
-                        global_v_samples[:, :, prev_v_latents:curr_v_latents] = res_v
-                        global_a_samples[:, :, prev_a_latents:curr_a_latents] = res_a
-                    else:
-                        gen_v_len = curr_v_latents - prev_v_latents
-                        gen_a_len = curr_a_latents - prev_a_latents
-                        global_v_samples[:, :, prev_v_latents:curr_v_latents] = res_v[:, :, -gen_v_len:]
-                        global_a_samples[:, :, prev_a_latents:curr_a_latents] = res_a[:, :, -gen_a_len:]
+            # 3. Slice the correct audio chunk for this shot
+            a_start_master = base_a_lat
+            a_end_master = min(end_a_lat, audio_samples.shape[2])
+            actual_a_len = a_end_master - a_start_master
+            if actual_a_len > 0:
+                pass_a_samples[:, :, :actual_a_len] = audio_samples[:, :, a_start_master:a_end_master]
+                pass_a_masks[:, :, :actual_a_len] = audio_noise_mask[:, :, a_start_master:a_end_master]
                 
-            sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
+            # 4. Autoregressive Inner Chunking Loop!
+            curr_global_sec = shot_start_sec
+            chunk_idx = 1
+            while curr_global_sec < shot_end_sec:
+                comfy.model_management.soft_empty_cache()
+                chunk_start_sec = curr_global_sec
+                
+                # Respect UI Settings for chunking boundaries
+                if not autoregressive_chunking:
+                    curr_global_sec = shot_end_sec
+                else:
+                    curr_global_sec = min(chunk_start_sec + chunk_size_seconds, shot_end_sec)
+                
+                curr_v_global, curr_a_global = get_latent_counts(curr_global_sec)
+                prev_v_global, prev_a_global = get_latent_counts(chunk_start_sec)
+                
+                # Zero-indexed local array matching
+                curr_v_lat = curr_v_global - base_v_lat
+                curr_a_lat = curr_a_global - base_a_lat
+                prev_v_lat = prev_v_global - base_v_lat
+                prev_a_lat = prev_a_global - base_a_lat
+                
+                if chunk_start_sec == shot_start_sec:
+                    ctx_v_lat = 0
+                    ctx_a_lat = 0
+                    print(f"   -> [Shot {s+1}/{num_prompts} - Chunk {chunk_idx}/{total_chunks_in_shot}] 0.0s to {curr_global_sec - shot_start_sec:.2f}s (Base Block)")
+                else:
+                    context_start_sec = max(shot_start_sec, chunk_start_sec - context_window_seconds)
+                    ctx_v_global, ctx_a_global = get_latent_counts(context_start_sec)
+                    ctx_v_lat = ctx_v_global - base_v_lat
+                    ctx_a_lat = ctx_a_global - base_a_lat
+                    print(f"   -> [Shot {s+1}/{num_prompts} - Chunk {chunk_idx}/{total_chunks_in_shot}] {chunk_start_sec - shot_start_sec:.2f}s to {curr_global_sec - shot_start_sec:.2f}s (Context Lookback: {chunk_start_sec - context_start_sec:.2f}s)")
+                    
+                # Slice the temporary chunk from the isolated shot tensor
+                chunk_v_samples = pass_v_samples[:, :, ctx_v_lat:curr_v_lat]
+                chunk_a_samples = pass_a_samples[:, :, ctx_a_lat:curr_a_lat]
+                chunk_v_masks = pass_v_masks[:, :, ctx_v_lat:curr_v_lat].clone()
+                chunk_a_masks = pass_a_masks[:, :, ctx_a_lat:curr_a_lat].clone()
+                
+                # Lock the context latents so they act purely as un-denoised reference guides!
+                if chunk_start_sec > shot_start_sec:
+                    chunk_v_masks[:, :, : (prev_v_lat - ctx_v_lat)] = 0.0
+                    chunk_a_masks[:, :, : (prev_a_lat - ctx_a_lat)] = 0.0
+                    
+                av_samples = comfy.nested_tensor.NestedTensor((chunk_v_samples, chunk_a_samples))
+                av_masks = comfy.nested_tensor.NestedTensor((chunk_v_masks, chunk_a_masks))
+                current_latent = {"samples": av_samples, "noise_mask": av_masks, "sample_rate": sampling_rate, "type": "audio"}
+                
+                primary_guider.set_conds([final_positive[s]], final_negative)
+                base_cb = latent_preview.prepare_callback(primary_guider.model_patcher, primary_sigmas.shape[-1] - 1, x0_output)
+                
+                # Update the callback string so the ComfyUI progress bar reflects the exact chunk!
+                callback = wrap_callback(base_cb, f"Shot {s+1}/{num_prompts} (Chunk {chunk_idx}/{total_chunks_in_shot})")
+                
+                sampled_chunk = primary_guider.sample(noise_obj.generate_noise(current_latent), current_latent["samples"], primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
+                
+                res_v, res_a = sampled_chunk.unbind()
+                res_v = res_v.to(device)
+                res_a = res_a.to(device)
+                
+                # Inject the generated chunk back into the isolated shot array
+                if chunk_start_sec == shot_start_sec:
+                    pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v
+                    pass_a_samples[:, :, prev_a_lat:curr_a_lat] = res_a
+                else:
+                    gen_v_len = curr_v_lat - prev_v_lat
+                    gen_a_len = curr_a_lat - prev_a_lat
+                    pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v[:, :, -gen_v_len:]
+                    
+                    # --- AUDIO CROSS-DISSOLVE (CHUNKS) ---
+                    # ~2.5 frames worth of audio latents
+                    a_fade = 6 
+                    if gen_a_len > a_fade and prev_a_lat >= a_fade:
+                        # Hard paste the bulk of the new audio chunk
+                        pass_a_samples[:, :, prev_a_lat:curr_a_lat] = res_a[:, :, -gen_a_len:]
+                        
+                        # Feather the seam using the generated context!
+                        prev_audio = pass_a_samples[:, :, prev_a_lat - a_fade : prev_a_lat].clone()
+                        context_audio = res_a[:, :, -gen_a_len - a_fade : -gen_a_len]
+                        
+                        fade_in = torch.linspace(0.0, 1.0, a_fade, device=device).view(1, 1, -1, 1)
+                        pass_a_samples[:, :, prev_a_lat - a_fade : prev_a_lat] = prev_audio * (1.0 - fade_in) + context_audio * fade_in
+                    else:
+                        pass_a_samples[:, :, prev_a_lat:curr_a_lat] = res_a[:, :, -gen_a_len:]
+                
+                chunk_idx += 1
+                    
+            # End of Autoregressive Loop for Shot S
+            isolated_v_shots.append(pass_v_samples)
+            isolated_a_shots.append(pass_a_samples)
+            
+        # 5. Concatenate the pristine, 0-indexed isolated shots end-to-end to form the timeline
+        global_v_samples = torch.cat(isolated_v_shots, dim=2)
+        global_a_samples = torch.cat(isolated_a_shots, dim=2)
+        
+        # --- AUDIO V-FADE (MULTI-SHOT BOUNDARIES) ---
+        if num_prompts > 1:
+            print("-> Applying Audio Latent V-Fade at Shot Boundaries...")
+            a_fade = 6  # ~2.5 frames of audio latents
+            current_a_idx = 0
+            
+            # Prepare the true silence pad
+            silence_pad = true_silence_latent[:, :, :a_fade].clone()
+            if silence_pad.shape[2] < a_fade:
+                pad_len = a_fade - silence_pad.shape[2]
+                silence_pad = torch.nn.functional.pad(silence_pad, (0, 0, 0, pad_len))
+                
+            for s in range(num_prompts - 1):
+                current_a_idx += isolated_a_shots[s].shape[2]
+                b_idx = current_a_idx
+                
+                if b_idx >= a_fade and b_idx + a_fade <= global_a_samples.shape[2]:
+                    # Extract the hard-cut audio edges
+                    left_audio = global_a_samples[:, :, b_idx - a_fade : b_idx].clone()
+                    right_audio = global_a_samples[:, :, b_idx : b_idx + a_fade].clone()
+                    
+                    # Fade Shot 1 out to silence
+                    fade_out = torch.linspace(1.0, 0.0, a_fade, device=device).view(1, 1, -1, 1)
+                    global_a_samples[:, :, b_idx - a_fade : b_idx] = left_audio * fade_out + silence_pad * (1.0 - fade_out)
+                    
+                    # Fade Shot 2 in from silence
+                    fade_in = torch.linspace(0.0, 1.0, a_fade, device=device).view(1, 1, -1, 1)
+                    global_a_samples[:, :, b_idx : b_idx + a_fade] = right_audio * fade_in + silence_pad * (1.0 - fade_in)
+
+        sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
 
         # ==========================================
         # MID-GENERATION STAGE 1 PREVIEW (MP4 MUX)
@@ -1366,7 +1505,30 @@ Output only the prompt. Nothing before it, nothing after it."""
             v_samps_prev = v_samps_prev.to(device)
             a_samps_prev = a_samps_prev.to(device)
 
-            preview_video = video_vae.decode(v_samps_prev)
+            if num_prompts > 1:
+                print("-> Executing Pure Isolated Array VAE Decode for pristine preview cuts...")
+                latents_per_shot = v_samps_prev.shape[2] // num_prompts
+                frames_per_shot_out = (length_in_seconds * current_fps) / num_prompts
+                
+                decoded_shots = []
+                for s in range(num_prompts):
+                    shot_latent = v_samps_prev[:, :, s * latents_per_shot : (s + 1) * latents_per_shot]
+                    decoded_shot = video_vae.decode(shot_latent)
+                    
+                    target_shot_frames = int(round((s + 1) * frames_per_shot_out)) - int(round(s * frames_per_shot_out))
+                    if s == 0 and out_ref_frame_count > 0:
+                        target_shot_frames += out_ref_frame_count
+                        
+                    if decoded_shot.shape[1] > target_shot_frames:
+                        decoded_shot = decoded_shot[:, :target_shot_frames]
+                    elif decoded_shot.shape[1] < target_shot_frames:
+                        pad_len = target_shot_frames - decoded_shot.shape[1]
+                        decoded_shot = torch.cat([decoded_shot, decoded_shot[:, -1:].repeat(1, pad_len, 1, 1, 1)], dim=1)
+                        
+                    decoded_shots.append(decoded_shot)
+                preview_video = torch.cat(decoded_shots, dim=1)
+            else:
+                preview_video = video_vae.decode(v_samps_prev)
 
             preview_video = preview_video[0] 
             
@@ -1394,7 +1556,50 @@ Output only the prompt. Nothing before it, nothing after it."""
                     save_sample_rate = sampling_rate 
                 else:
                     print("--- Decoding Stage 1 Preview Audio ---")
-                    preview_audio_wf = audio_vae.decode(a_samps_prev).to(device).movedim(-1, 1)
+                    if num_prompts > 1:
+                        print("-> Applying Long Mirror Crossfade (fps/2) for seamless preview audio...")
+                        sr = int(getattr(audio_vae, "output_sample_rate", audio_vae.first_stage_model.output_sample_rate))
+                        a_latents_per_shot = a_samps_prev.shape[2] // num_prompts
+                        
+                        decoded_a_shots = []
+                        for s in range(num_prompts):
+                            s_lat = a_samps_prev[:, :, s * a_latents_per_shot : (s + 1) * a_latents_per_shot]
+                            s_wf = audio_vae.decode(s_lat).to(device).movedim(-1, 1)
+                            decoded_a_shots.append(s_wf)
+                            
+                        preview_audio_wf = torch.cat(decoded_a_shots, dim=-1)
+                        
+                        # Dynamic FPS/2 frames of audio overlap (~0.5 seconds)
+                        fade_frames = current_fps / 2.0
+                        fade_len = int((fade_frames / current_fps) * sr)
+                        
+                        # Safety clamp to ensure the fade doesn't consume the entire shot
+                        shot_len_samples = int((length_in_seconds / num_prompts) * sr)
+                        fade_len = min(fade_len, max(1, (shot_len_samples // 2) - 1))
+                        
+                        current_idx = 0
+                        for s in range(num_prompts - 1):
+                            current_idx += decoded_a_shots[s].shape[-1]
+                            b_idx = current_idx
+                            
+                            if b_idx >= fade_len and b_idx + fade_len <= preview_audio_wf.shape[-1]:
+                                # Extract the hard-cut edges
+                                left_audio = preview_audio_wf[..., b_idx - fade_len : b_idx].clone()
+                                right_audio = preview_audio_wf[..., b_idx : b_idx + fade_len].clone()
+                                
+                                # Create mirror extensions to maintain timeline length
+                                left_extend = torch.cat([left_audio, left_audio.flip(-1)], dim=-1)
+                                right_extend = torch.cat([right_audio.flip(-1), right_audio], dim=-1)
+                                
+                                # True Cross-Dissolve over the mirrored pads
+                                fade_in = torch.linspace(0.0, 1.0, fade_len * 2, device=device, dtype=preview_audio_wf.dtype)
+                                blended = left_extend * (1.0 - fade_in) + right_extend * fade_in
+                                
+                                # Paste the seamless transition back into the timeline
+                                preview_audio_wf[..., b_idx - fade_len : b_idx + fade_len] = blended
+                    else:
+                        preview_audio_wf = audio_vae.decode(a_samps_prev).to(device).movedim(-1, 1)
+                        
                     wf_out = preview_audio_wf[0].cpu()
                     if wf_out.ndim == 3:
                         wf_out = wf_out.squeeze(0)
@@ -1495,13 +1700,23 @@ Output only the prompt. Nothing before it, nothing after it."""
             
             while chunk_start < v_frames:
                 comfy.model_management.soft_empty_cache()
+
+                # SHOT-AWARE BOUNDARY MATH: Treats the stacked array as isolated slots!
+                shot_len_latents = v_frames / num_prompts 
+                current_shot = min(int(chunk_start // shot_len_latents), num_prompts - 1)
+                shot_start = int(current_shot * shot_len_latents)
+                shot_end = int((current_shot + 1) * shot_len_latents) if current_shot < num_prompts - 1 else v_frames
                 
-                if chunk_start == 0:
-                    chunk_end = min(chunk_start + temp_tile_len, v_frames)
+                if chunk_start == shot_start:
+                    chunk_end = min(chunk_start + temp_tile_len, shot_end)
                     overlap_start = chunk_start
                 else:
-                    overlap_start = max(1, chunk_start - temp_overlap - 1)
-                    chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), v_frames)
+                    overlap_start = max(shot_start + 1, chunk_start - temp_overlap - 1)
+                    chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), shot_end)
+                    
+                # FAILSAFE: Guarantee forward mathematical progress
+                if chunk_end <= chunk_start:
+                    chunk_end = chunk_start + 1
                     
                 v_tile = v_samps[:, :, overlap_start:chunk_end]
                 
@@ -1755,7 +1970,6 @@ Output only the prompt. Nothing before it, nothing after it."""
             # 1. GLOBAL PREP: AUDIO ALIGNMENT & STRETCH
             # ---------------------------------------------------------
             print(f"-> Preparing perfectly aligned audio stretch (Isolated Mode: {temp_video_mode})...")
-            import math
             import torchaudio.functional as TA_F
             
             # Because we lobbed off the reference latents, ALL modes now run the proven pristine logic!
@@ -1907,13 +2121,21 @@ Output only the prompt. Nothing before it, nothing after it."""
             # ---------------------------------------------------------
             while chunk_start < v_frames_base:
                 comfy.model_management.soft_empty_cache()
+
+                shot_len_latents = v_frames_base / num_prompts 
+                current_shot = min(int(chunk_start // shot_len_latents), num_prompts - 1)
+                shot_start = int(current_shot * shot_len_latents)
+                shot_end = int((current_shot + 1) * shot_len_latents) if current_shot < num_prompts - 1 else v_frames_base
                 
-                if chunk_start == 0:
-                    chunk_end = min(chunk_start + temp_tile_len, v_frames_base)
+                if chunk_start == shot_start:
+                    chunk_end = min(chunk_start + temp_tile_len, shot_end)
                     overlap_start = chunk_start
                 else:
-                    overlap_start = max(1, chunk_start - temp_overlap - 1)
-                    chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), v_frames_base)
+                    overlap_start = max(shot_start + 1, chunk_start - temp_overlap - 1)
+                    chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), shot_end)
+                    
+                if chunk_end <= chunk_start:
+                    chunk_end = chunk_start + 1
 
                 # Slice Video
                 v_tile = final_video_samples[:, :, overlap_start:chunk_end]
@@ -2132,8 +2354,32 @@ Output only the prompt. Nothing before it, nothing after it."""
                     print(f"\nWARNING: Face restoration initialization failed: {e}")
                     restore_faces = False
 
-            decoded_video = video_vae.decode(final_video_samples)
-
+            if num_prompts > 1:
+                print("-> Executing Pure Isolated Array VAE Decode for pristine hard cuts...")
+                latents_per_shot = final_video_samples.shape[2] // num_prompts
+                frames_per_shot_out = (length_in_seconds * current_fps) / num_prompts
+                
+                decoded_shots = []
+                for s in range(num_prompts):
+                    shot_latent = final_video_samples[:, :, s * latents_per_shot : (s + 1) * latents_per_shot]
+                    decoded_shot = video_vae.decode(shot_latent)
+                    
+                    target_shot_frames = int(round((s + 1) * frames_per_shot_out)) - int(round(s * frames_per_shot_out))
+                    if s == 0 and out_ref_frame_count > 0:
+                        target_shot_frames += out_ref_frame_count
+                        
+                    if decoded_shot.shape[1] > target_shot_frames:
+                        decoded_shot = decoded_shot[:, :target_shot_frames]
+                    elif decoded_shot.shape[1] < target_shot_frames:
+                        pad_len = target_shot_frames - decoded_shot.shape[1]
+                        decoded_shot = torch.cat([decoded_shot, decoded_shot[:, -1:].repeat(1, pad_len, 1, 1, 1)], dim=1)
+                        
+                    decoded_shots.append(decoded_shot)
+                decoded_video = torch.cat(decoded_shots, dim=1)
+            else:
+                decoded_video = video_vae.decode(final_video_samples)
+                
+            # Flatten batch dimension for output compatibility
             decoded_video = decoded_video.view(v_batch * decoded_video.shape[1], decoded_video.shape[2], decoded_video.shape[3], 3)
 
             if restore_faces and face_helper is not None and loaded_facerestore_model is not None:
@@ -2224,9 +2470,49 @@ Output only the prompt. Nothing before it, nothing after it."""
             samples_to_drop = int(time_to_drop * sample_rate)
 
             print("--- Decoding Master Audio Track ---")
-            waveform = audio_vae.decode(a_latent_samples).to(a_latent_samples.device).movedim(-1, 1)
+            if num_prompts > 1:
+                print("-> Executing Isolated Audio Decode with Long Mirror Crossfade (fps/2)...")
+                a_latents_per_shot = a_latent_samples.shape[2] // num_prompts
+                
+                decoded_a_shots = []
+                for s in range(num_prompts):
+                    s_lat = a_latent_samples[:, :, s * a_latents_per_shot : (s + 1) * a_latents_per_shot]
+                    s_wf = audio_vae.decode(s_lat).to(a_latent_samples.device).movedim(-1, 1)
+                    decoded_a_shots.append(s_wf)
+                    
+                waveform = torch.cat(decoded_a_shots, dim=-1)
+                
+                # Dynamic FPS/2 frames of audio overlap (~0.5 seconds)
+                fade_frames = base_fps / 2.0
+                fade_len = int((fade_frames / base_fps) * sample_rate)
+                
+                # Safety clamp to ensure the fade doesn't consume the entire shot
+                shot_len_samples = int((length_in_seconds / num_prompts) * sample_rate)
+                fade_len = min(fade_len, max(1, (shot_len_samples // 2) - 1))
+                
+                current_idx = 0
+                for s in range(num_prompts - 1):
+                    current_idx += decoded_a_shots[s].shape[-1]
+                    b_idx = current_idx
+                    
+                    if b_idx >= fade_len and b_idx + fade_len <= waveform.shape[-1]:
+                        # Extract the hard-cut edges
+                        left_audio = waveform[..., b_idx - fade_len : b_idx].clone()
+                        right_audio = waveform[..., b_idx : b_idx + fade_len].clone()
+                        
+                        # Create mirror extensions to maintain timeline length
+                        left_extend = torch.cat([left_audio, left_audio.flip(-1)], dim=-1)
+                        right_extend = torch.cat([right_audio.flip(-1), right_audio], dim=-1)
+                        
+                        # True Cross-Dissolve over the mirrored pads
+                        fade_in = torch.linspace(0.0, 1.0, fade_len * 2, device=waveform.device, dtype=waveform.dtype)
+                        blended = left_extend * (1.0 - fade_in) + right_extend * fade_in
+                        
+                        # Paste the seamless transition back into the timeline
+                        waveform[..., b_idx - fade_len : b_idx + fade_len] = blended
+            else:
+                waveform = audio_vae.decode(a_latent_samples).to(a_latent_samples.device).movedim(-1, 1)
 
-            # CRITICAL FIX: Only paste pristine audio if the timeline was NOT temporally stretched!
             if (has_audio_ref or has_audio_input) and not temporal_upscale:
                 pristine_wf = torchaudio.functional.resample(master_wf.clone(), sampling_rate, sample_rate).to(waveform.device)
                 
@@ -2338,10 +2624,18 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         if model_to_use is not None:
             model_to_use.unpatch_model()
+            if hasattr(model_to_use, "object_patches"): model_to_use.object_patches.clear()
+            if hasattr(model_to_use, "model_options"): model_to_use.model_options.clear()
+            
         if model2_to_use is not None and model2_to_use is not model_to_use:
             model2_to_use.unpatch_model()
+            if hasattr(model2_to_use, "object_patches"): model2_to_use.object_patches.clear()
+            if hasattr(model2_to_use, "model_options"): model2_to_use.model_options.clear()
+            
         if model3_to_use is not None and model3_to_use is not model_to_use and model3_to_use is not model2_to_use:
             model3_to_use.unpatch_model()
+            if hasattr(model3_to_use, "object_patches"): model3_to_use.object_patches.clear()
+            if hasattr(model3_to_use, "model_options"): model3_to_use.model_options.clear()
 
         del model1_primary
         del model_to_use
