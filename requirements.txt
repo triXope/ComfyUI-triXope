@@ -2,6 +2,7 @@
 Pillow
 numpy
 opencv-python-headless
+av
 
 # API and Network Requests (For Ollama)
 requests
