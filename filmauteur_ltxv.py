@@ -883,6 +883,10 @@ Output only the prompt. Nothing before it, nothing after it."""
         # 3.4 HELPER: LATENT COUNTER
         # ==========================================
         def get_latent_counts(sec):
+            # 0-Index the absolute start
+            if sec <= 0.0:
+                return 0, 0
+                
             # Map continuous seconds to our isolated shot blocks!
             shot_idx = int(sec // shot_seconds)
             if shot_idx >= num_prompts:
@@ -890,19 +894,28 @@ Output only the prompt. Nothing before it, nothing after it."""
                 
             remainder_sec = sec - (shot_idx * shot_seconds)
             
-            if bypass_img_ref:
-                raw_frames = int((remainder_sec * current_fps) + 1)
+            # If the remainder is functionally zero, we are exactly on a shot boundary!
+            if remainder_sec <= 0.001:
+                v_lat = shot_idx * latents_per_shot
             else:
-                raw_frames = int((a * duplicate_frames) + (remainder_sec * current_fps) + 9)
+                if bypass_img_ref:
+                    raw_frames = int((remainder_sec * current_fps) + 1)
+                else:
+                    raw_frames = int((a * duplicate_frames) + (remainder_sec * current_fps) + 9)
+                    
+                local_v_lat = int(((raw_frames - 1) // 8) + 1)
+                if local_v_lat < 1: local_v_lat = 1
                 
-            local_v_lat = int(((raw_frames - 1) // 8) + 1)
-            if local_v_lat < 1: local_v_lat = 1
+                v_lat = (shot_idx * latents_per_shot) + local_v_lat
             
-            v_lat = (shot_idx * latents_per_shot) + local_v_lat
-            
-            synced_frames = int(((v_lat - 1) * 8) + 1)
+            # Map audio perfectly to the 0-indexed video latents
+            synced_frames = int(((v_lat - 1) * 8) + 1) if v_lat > 0 else 1
             get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
             a_lat = get_audio_latents_func(synced_frames, int(current_fps))
+            
+            if v_lat == 0:
+                a_lat = 0
+                
             return v_lat, a_lat
 
         if bypass_img_ref:
