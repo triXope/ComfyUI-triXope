@@ -384,7 +384,7 @@ class FilmAuteur_LTXV:
                 "spatial_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
                 "temporal_upscale": ("BOOLEAN", {"default": True}),
                 "temporal_denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
-                "restore_faces": ("BOOLEAN", {"default": False}),
+                "restore_faces": ("BOOLEAN", {"default": True}),
                 "facerestore_model": (get_trixope_facerestore_models(), {}),
                 "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"], {}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
@@ -2368,14 +2368,15 @@ Output only the prompt. Nothing before it, nothing after it."""
                     restore_faces = False
 
             if num_prompts > 1:
-                print("-> Executing Pure Isolated Array VAE Decode for pristine hard cuts...")
+                print("-> Executing Pure Isolated Array VAE Decode (CPU Offloaded)...")
                 latents_per_shot = final_video_samples.shape[2] // num_prompts
                 frames_per_shot_out = (length_in_seconds * current_fps) / num_prompts
                 
                 decoded_shots = []
                 for s in range(num_prompts):
                     shot_latent = final_video_samples[:, :, s * latents_per_shot : (s + 1) * latents_per_shot]
-                    decoded_shot = video_vae.decode(shot_latent)
+                    # INSTANT CPU OFFLOAD: Prevents VRAM from exploding on long timelines!
+                    decoded_shot = video_vae.decode(shot_latent).cpu()
                     
                     target_shot_frames = int(round((s + 1) * frames_per_shot_out)) - int(round(s * frames_per_shot_out))
                     if s == 0 and out_ref_frame_count > 0:
@@ -2390,17 +2391,18 @@ Output only the prompt. Nothing before it, nothing after it."""
                     decoded_shots.append(decoded_shot)
                 decoded_video = torch.cat(decoded_shots, dim=1)
             else:
-                decoded_video = video_vae.decode(final_video_samples)
+                # INSTANT CPU OFFLOAD
+                decoded_video = video_vae.decode(final_video_samples).cpu()
                 
             # Flatten batch dimension for output compatibility
             decoded_video = decoded_video.view(v_batch * decoded_video.shape[1], decoded_video.shape[2], decoded_video.shape[3], 3)
 
             if restore_faces and face_helper is not None and loaded_facerestore_model is not None:
-                print(f"-> Restoring faces in video...")
-                restored_video = []
+                print(f"-> Restoring faces in video (Optimized In-Place Memory Processing)...")
                 for f in range(decoded_video.shape[0]):
                     frame_tensor = decoded_video[f]
-                    frame_np = (frame_tensor.cpu().numpy() * 255.0).astype(np.uint8)
+                    # Already on CPU, no extra VRAM jump required
+                    frame_np = (frame_tensor.numpy() * 255.0).astype(np.uint8)
                     frame_bgr = frame_np[:, :, ::-1]
                     
                     face_helper.clean_all()
@@ -2413,6 +2415,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                         cropped_face_t = cv2.cvtColor(cropped_face_t, cv2.COLOR_BGR2RGB)
                         cropped_face_t = torch.from_numpy(cropped_face_t.transpose(2, 0, 1)).float()
                         
+                        from torchvision.transforms.functional import normalize
                         normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
                         cropped_face_t = cropped_face_t.unsqueeze(0).to(fr_device)
                         
@@ -2462,8 +2465,13 @@ Output only the prompt. Nothing before it, nothing after it."""
                         final_img_bgr = pasted_img_bgr
                         
                     restored_img_rgb = final_img_bgr[:, :, ::-1]
-                    restored_video.append(torch.from_numpy(restored_img_rgb.astype(np.float32) / 255.0).to(decoded_video.device))
-                decoded_video = torch.stack(restored_video, dim=0)
+                    
+                    # IN-PLACE RAM OVERWRITE: Destroys the old un-restored frame to prevent RAM doubling!
+                    decoded_video[f] = torch.from_numpy(restored_img_rgb.astype(np.float32) / 255.0)
+                    
+                    # PERIODIC VRAM FLUSH: Clears the CodeFormer GPU buffers every 16 frames
+                    if f > 0 and f % 16 == 0:
+                        comfy.model_management.soft_empty_cache()
             
             a_latent_samples = final_audio_samples
             if a_latent_samples.is_nested:
@@ -2525,6 +2533,30 @@ Output only the prompt. Nothing before it, nothing after it."""
                         waveform[..., b_idx - fade_len : b_idx + fade_len] = blended
             else:
                 waveform = audio_vae.decode(a_latent_samples).to(a_latent_samples.device).movedim(-1, 1)
+
+            # --- THE POST-DECODE MASTERING PASS (ANTI-CLIP & NORMALIZE) ---
+            print("-> Running Final Audio Mastering Pass (Soft Limiter & Normalization)...")
+            
+            # 1. Soft Limiter (Anti-Clipping)
+            # Smoothly compresses extreme peaks instead of letting them hit the digital ceiling and pop
+            threshold = 0.90
+            abs_wf = torch.abs(waveform)
+            clip_mask = abs_wf > threshold
+            if clip_mask.any():
+                waveform[clip_mask] = torch.sign(waveform[clip_mask]) * (threshold + 0.1 * torch.tanh((abs_wf[clip_mask] - threshold) / 0.1))
+                
+            # 2. Auto-Gain / Normalization (Fixes volume drops)
+            # Finds the loudest peak and safely boosts the entire track to a cinematic standard
+            max_val = torch.max(torch.abs(waveform))
+            target_peak = 0.95
+            if max_val > 0.0:
+                gain_boost = target_peak / max_val
+                # Clamp the boost so we don't accidentally blow out quiet ambient noise into loud static
+                gain_boost = min(gain_boost, 3.0)
+                waveform = waveform * gain_boost
+                
+            # 3. Absolute Safety Clamp
+            waveform = torch.clamp(waveform, -1.0, 1.0)
 
             if (has_audio_ref or has_audio_input) and not temporal_upscale:
                 pristine_wf = torchaudio.functional.resample(master_wf.clone(), sampling_rate, sample_rate).to(waveform.device)
