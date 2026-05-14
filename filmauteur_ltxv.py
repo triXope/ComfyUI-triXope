@@ -324,6 +324,44 @@ def preprocess_compression(image: torch.Tensor, crf=29):
     tensor = torch.tensor(image_array, dtype=image.dtype, device=image.device) / 255.0
     return tensor
 
+RESOLUTION_OPTIONS = [
+    "--- 𝟭:𝟭 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗦𝗾𝘂𝗮𝗿𝗲) ---",
+    "512\u00A0 × 512\u00A0 — Fast low-VRAM generation",
+    "768\u00A0 × 768\u00A0 — Balanced resolution sweet spot",
+    "1024 × 1024 — Standard high-definition square layout",
+    "1536 × 1536 — Pro fidelity upscale target",
+    "--- 𝟰:𝟯 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗦𝘁𝗮𝗻𝗱𝗮𝗿𝗱 𝗟𝗮𝗻𝗱𝘀𝗰𝗮𝗽𝗲) ---",
+    "512\u00A0 × 384\u00A0 — Low-resolution draft option",
+    "1024 × 768\u00A0 — Exact native classic frame",
+    "1536 × 1152 — Sharp high-resolution landscape grid",
+    "2048 × 1536 — Ultra-high density presentation resolution",
+    "--- 𝟯:𝟰 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗦𝘁𝗮𝗻𝗱𝗮𝗿𝗱 𝗣𝗼𝗿𝘁𝗿𝗮𝗶𝘁) ---",
+    "384\u00A0 × 512\u00A0 — Low-resolution vertical layout",
+    "768\u00A0 × 1024 — Exact vertical presentation shape",
+    "1152 × 1536 — High-definition mobile portrait preview",
+    "1536 × 2048 — Maximum density vertical layout",
+    "--- 𝟭𝟲:𝟵 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗪𝗶𝗱𝗲𝘀𝗰𝗿𝗲𝗲𝗻) ---",
+    "1152 × 640\u00A0 — High-speed widescreen draft approximation",
+    "1792 × 1024 — Close standard HD variation",
+    "2048 × 1152 — Exact 16:9 math configuration",
+    "3840 × 2176 — Immersive 4K UHD approximation",
+    "--- 𝟵:𝟭𝟲 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗩𝗲𝗿𝘁𝗶𝗰𝗮𝗹 𝗪𝗶𝗱𝗲𝘀𝗰𝗿𝗲𝗲𝗻) ---",
+    "640\u00A0 × 1152 — Fast vertical mobile approximation",
+    "1024 × 1792 — Optimized social reel layout",
+    "1152 × 2048 — Exact native 9:16 configuration",
+    "2176 × 3840 — Ultra-high definition mobile layout",
+    "--- 𝟮𝟭:𝟵 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗖𝗶𝗻𝗲𝗺𝗮𝘁𝗶𝗰 𝗨𝗹𝘁𝗿𝗮𝘄𝗶𝗱𝗲) ---",
+    "896\u00A0 × 384\u00A0 — Low-VRAM horizontal cinematic draft",
+    "1792 × 768\u00A0 — Exact cinematic widescreen resolution",
+    "2688 × 1152 — Immersive high-definition panoramic target",
+    "3584 × 1536 — Maximum resolution multi-window layout",
+    "--- 𝟵:𝟮𝟭 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗩𝗲𝗿𝘁𝗶𝗰𝗮𝗹 𝗨𝗹𝘁𝗿𝗮𝘄𝗶𝗱𝗲) ---",
+    "384\u00A0 × 896\u00A0 — Tall smartphone display layout",
+    "768\u00A0 × 1792 — Exact vertical cinematic layout",
+    "1152 × 2688 — Ultra-tall narrow video layout",
+    "1536 × 3584 — Maximum resolution panoramic portrait"
+]
+
 class FilmAuteur_LTXV:
 
     @classmethod
@@ -361,8 +399,7 @@ class FilmAuteur_LTXV:
                 "grp_specs": (["▼ Video Specs"], {}),
                 "seed_number": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "control_before_generate": (["randomize", "fixed", "increment", "decrement"], {"default": "randomize"}),
-                "target_width": ("INT", {"default": 1792, "min": 64, "max": 8192, "step": 32}),
-                "target_height": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 32}),
+                "target_resolution": (RESOLUTION_OPTIONS, {"default": "1792 × 768\u00A0 — Exact cinematic widescreen resolution"}),
                 "length_in_seconds": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 300.0, "step": 0.1}),
                 "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0}),
 
@@ -425,7 +462,7 @@ class FilmAuteur_LTXV:
     def process(self, clip, video_vae, audio_vae, model1_primary, character_descriptions, location_description, scene_descriptions,
                 video_mode, image_strength, img_compression, audio_select, identity_guidance_scale,
                 use_ollama, ollama_url, ollama_model,
-                seed_number, control_before_generate, target_width, target_height, length_in_seconds, frame_rate,
+                seed_number, control_before_generate, target_resolution, length_in_seconds, frame_rate,
                 primary_sampler_name, primary_cfg, primary_steps,
                 eta, bongmath, enable_nag,
                 spatial_upscale, spatial_passes, spatial_sampler, spatial_cfg, spatial_sigmas, temporal_upscale, temporal_denoise,
@@ -551,6 +588,23 @@ class FilmAuteur_LTXV:
                 except Exception:
                     pass 
             return comfy.samplers.sampler_object(name)
+
+        # Parse Resolution Dropdown
+        parsed_width = 1792
+        parsed_height = 768
+        
+        if "×" in target_resolution and not target_resolution.startswith("---"):
+            try:
+                dims = target_resolution.split("—")[0]
+                parsed_width = int(dims.split("×")[0].strip())
+                parsed_height = int(dims.split("×")[1].strip())
+            except Exception as e:
+                print(f"LTXV Custom Warning: Failed to parse resolution '{resolution}'. Defaulting to 1792x768.")
+        else:
+            print(f"LTXV Custom Warning: Category Spacer selected instead of resolution. Defaulting to 1792x768.")
+
+        target_width = parsed_width
+        target_height = parsed_height
 
         divisor = (2 ** spatial_passes) if spatial_upscale else 1
         initial_width = target_width // divisor
@@ -1448,22 +1502,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                     gen_v_len = curr_v_lat - prev_v_lat
                     gen_a_len = curr_a_lat - prev_a_lat
                     pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v[:, :, -gen_v_len:]
-                    
-                    # --- AUDIO CROSS-DISSOLVE (CHUNKS) ---
-                    # ~2.5 frames worth of audio latents
-                    a_fade = 6 
-                    if gen_a_len > a_fade and prev_a_lat >= a_fade:
-                        # Hard paste the bulk of the new audio chunk
-                        pass_a_samples[:, :, prev_a_lat:curr_a_lat] = res_a[:, :, -gen_a_len:]
-                        
-                        # Feather the seam using the generated context!
-                        prev_audio = pass_a_samples[:, :, prev_a_lat - a_fade : prev_a_lat].clone()
-                        context_audio = res_a[:, :, -gen_a_len - a_fade : -gen_a_len]
-                        
-                        fade_in = torch.linspace(0.0, 1.0, a_fade, device=device).view(1, 1, -1, 1)
-                        pass_a_samples[:, :, prev_a_lat - a_fade : prev_a_lat] = prev_audio * (1.0 - fade_in) + context_audio * fade_in
-                    else:
-                        pass_a_samples[:, :, prev_a_lat:curr_a_lat] = res_a[:, :, -gen_a_len:]
+                    pass_a_samples[:, :, prev_a_lat:curr_a_lat] = res_a[:, :, -gen_a_len:]
                 
                 chunk_idx += 1
                     
@@ -1474,36 +1513,6 @@ Output only the prompt. Nothing before it, nothing after it."""
         # 5. Concatenate the pristine, 0-indexed isolated shots end-to-end to form the timeline
         global_v_samples = torch.cat(isolated_v_shots, dim=2)
         global_a_samples = torch.cat(isolated_a_shots, dim=2)
-        
-        # --- AUDIO V-FADE (MULTI-SHOT BOUNDARIES) ---
-        if num_prompts > 1:
-            print("-> Applying Audio Latent V-Fade at Shot Boundaries...")
-            a_fade = 6  # ~2.5 frames of audio latents
-            current_a_idx = 0
-            
-            # Prepare the true silence pad
-            silence_pad = true_silence_latent[:, :, :a_fade].clone()
-            if silence_pad.shape[2] < a_fade:
-                pad_len = a_fade - silence_pad.shape[2]
-                silence_pad = torch.nn.functional.pad(silence_pad, (0, 0, 0, pad_len))
-                
-            for s in range(num_prompts - 1):
-                current_a_idx += isolated_a_shots[s].shape[2]
-                b_idx = current_a_idx
-                
-                if b_idx >= a_fade and b_idx + a_fade <= global_a_samples.shape[2]:
-                    # Extract the hard-cut audio edges
-                    left_audio = global_a_samples[:, :, b_idx - a_fade : b_idx].clone()
-                    right_audio = global_a_samples[:, :, b_idx : b_idx + a_fade].clone()
-                    
-                    # Fade Shot 1 out to silence
-                    fade_out = torch.linspace(1.0, 0.0, a_fade, device=device).view(1, 1, -1, 1)
-                    global_a_samples[:, :, b_idx - a_fade : b_idx] = left_audio * fade_out + silence_pad * (1.0 - fade_out)
-                    
-                    # Fade Shot 2 in from silence
-                    fade_in = torch.linspace(0.0, 1.0, a_fade, device=device).view(1, 1, -1, 1)
-                    global_a_samples[:, :, b_idx : b_idx + a_fade] = right_audio * fade_in + silence_pad * (1.0 - fade_in)
-
         sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
 
         # ==========================================
@@ -2230,7 +2239,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                     "is_face_restore": bool(restore_faces)
                 })
                 
-                print(f"-> Executing Inlined Temporal KSampler Chunk {chunk_idx}/{num_chunks}...")
+                print(f"-> Temporal Upscale Chunk {chunk_idx}/{num_chunks}...")
                 chunk_seed = seed_number + chunk_idx
 
                 # 1. Setup the CFG Guider
@@ -2491,15 +2500,30 @@ Output only the prompt. Nothing before it, nothing after it."""
             samples_to_drop = int(time_to_drop * sample_rate)
 
             print("--- Decoding Master Audio Track ---")
-            if num_prompts > 1:
-                print("-> Executing Isolated Audio Decode with Long Mirror Crossfade (fps/2)...")
-                a_latents_per_shot = a_latent_samples.shape[2] // num_prompts
+            
+            # Determine total structural boundaries (Chunks AND Shots)
+            total_splits = 1
+            if autoregressive_chunking and chunk_size_seconds < length_in_seconds:
+                total_splits = int(round(length_in_seconds / chunk_size_seconds))
+                
+            if total_splits > 1:
+                print(f"-> Executing Isolated Audio Decode for {total_splits} chunks with Long Mirror Crossfade (fps/2)...")
                 
                 decoded_a_shots = []
-                for s in range(num_prompts):
-                    s_lat = a_latent_samples[:, :, s * a_latents_per_shot : (s + 1) * a_latents_per_shot]
-                    s_wf = audio_vae.decode(s_lat).to(a_latent_samples.device).movedim(-1, 1)
-                    decoded_a_shots.append(s_wf)
+                for s in range(total_splits):
+                    start_sec = s * chunk_size_seconds
+                    end_sec = min((s + 1) * chunk_size_seconds, length_in_seconds)
+                    
+                    _, start_a_lat = get_latent_counts(start_sec)
+                    _, end_a_lat = get_latent_counts(end_sec)
+                    
+                    start_a_lat = min(start_a_lat, a_latent_samples.shape[2])
+                    end_a_lat = min(end_a_lat, a_latent_samples.shape[2])
+                    
+                    if start_a_lat < end_a_lat:
+                        s_lat = a_latent_samples[:, :, start_a_lat : end_a_lat]
+                        s_wf = audio_vae.decode(s_lat).to(a_latent_samples.device).movedim(-1, 1)
+                        decoded_a_shots.append(s_wf)
                     
                 waveform = torch.cat(decoded_a_shots, dim=-1)
                 
@@ -2507,12 +2531,12 @@ Output only the prompt. Nothing before it, nothing after it."""
                 fade_frames = base_fps / 2.0
                 fade_len = int((fade_frames / base_fps) * sample_rate)
                 
-                # Safety clamp to ensure the fade doesn't consume the entire shot
-                shot_len_samples = int((length_in_seconds / num_prompts) * sample_rate)
+                # Safety clamp
+                shot_len_samples = int(chunk_size_seconds * sample_rate)
                 fade_len = min(fade_len, max(1, (shot_len_samples // 2) - 1))
                 
                 current_idx = 0
-                for s in range(num_prompts - 1):
+                for s in range(len(decoded_a_shots) - 1):
                     current_idx += decoded_a_shots[s].shape[-1]
                     b_idx = current_idx
                     
@@ -2533,30 +2557,6 @@ Output only the prompt. Nothing before it, nothing after it."""
                         waveform[..., b_idx - fade_len : b_idx + fade_len] = blended
             else:
                 waveform = audio_vae.decode(a_latent_samples).to(a_latent_samples.device).movedim(-1, 1)
-
-            # --- THE POST-DECODE MASTERING PASS (ANTI-CLIP & NORMALIZE) ---
-            print("-> Running Final Audio Mastering Pass (Soft Limiter & Normalization)...")
-            
-            # 1. Soft Limiter (Anti-Clipping)
-            # Smoothly compresses extreme peaks instead of letting them hit the digital ceiling and pop
-            threshold = 0.90
-            abs_wf = torch.abs(waveform)
-            clip_mask = abs_wf > threshold
-            if clip_mask.any():
-                waveform[clip_mask] = torch.sign(waveform[clip_mask]) * (threshold + 0.1 * torch.tanh((abs_wf[clip_mask] - threshold) / 0.1))
-                
-            # 2. Auto-Gain / Normalization (Fixes volume drops)
-            # Finds the loudest peak and safely boosts the entire track to a cinematic standard
-            max_val = torch.max(torch.abs(waveform))
-            target_peak = 0.95
-            if max_val > 0.0:
-                gain_boost = target_peak / max_val
-                # Clamp the boost so we don't accidentally blow out quiet ambient noise into loud static
-                gain_boost = min(gain_boost, 3.0)
-                waveform = waveform * gain_boost
-                
-            # 3. Absolute Safety Clamp
-            waveform = torch.clamp(waveform, -1.0, 1.0)
 
             if (has_audio_ref or has_audio_input) and not temporal_upscale:
                 pristine_wf = torchaudio.functional.resample(master_wf.clone(), sampling_rate, sample_rate).to(waveform.device)
@@ -2621,6 +2621,27 @@ Output only the prompt. Nothing before it, nothing after it."""
             if out_audio is not None and out_audio["waveform"].shape[-1] > exact_target_samples:
                 out_audio["waveform"] = out_audio["waveform"][..., :exact_target_samples]
                 print(f"-> Trimmed output audio to exactly {exact_target_samples} samples.")
+
+            # --- THE POST-DECODE MASTERING PASS (ANTI-CLIP & NORMALIZE) ---
+            print("-> Running Final Audio Mastering Pass (Soft Limiter & Normalization)...")
+            
+            # 1. Soft Limiter (Anti-Clipping)
+            threshold = 0.90
+            abs_wf = torch.abs(waveform)
+            clip_mask = abs_wf > threshold
+            if clip_mask.any():
+                waveform[clip_mask] = torch.sign(waveform[clip_mask]) * (threshold + 0.1 * torch.tanh((abs_wf[clip_mask] - threshold) / 0.1))
+                
+            # 2. Auto-Gain / Normalization (Fixes volume drops)
+            max_val = torch.max(torch.abs(waveform))
+            if max_val > 0.0:
+                gain_boost = 0.95 / max_val
+                # Tensor-safe clamp to prevent blowing out quiet ambient noise
+                gain_boost = torch.clamp(gain_boost, max=3.0)
+                waveform = waveform * gain_boost
+                
+            # 3. Absolute Safety Clamp
+            waveform = torch.clamp(waveform, -1.0, 1.0)
 
             total_samples = waveform.shape[-1]
             
