@@ -79,7 +79,7 @@ app.registerExtension({
                 const groupDefinitions = [
                     { btnName: "grp_mode", label: "Mode Select", widgets: ["video_mode", "image_strength", "img_compression", "audio_select", "identity_guidance_scale"] },
                     { btnName: "grp_prompting", label: "Prompting", widgets: ["character_descriptions", "location_description", "scene_descriptions", "use_ollama", "ollama_url", "ollama_model"] },
-                    { btnName: "grp_specs", label: "Video Specs", widgets: ["seed_number", "control_before_generate", "target_width", "target_height", "length_in_seconds", "frame_rate"] },
+                    { btnName: "grp_specs", label: "Video Specs", widgets: ["seed_number", "control_before_generate", "target_resolution", "length_in_seconds", "frame_rate"] },
                     { btnName: "grp_sampling", label: "Primary Sampling", widgets: ["primary_sampler_name", "primary_cfg", "primary_steps", "eta", "bongmath", "enable_nag"] },
                     { btnName: "grp_refinement", label: "Upscale & Refine", widgets: ["spatial_upscale", "spatial_passes", "spatial_sampler", "spatial_cfg", "spatial_sigmas", "temporal_upscale", "temporal_denoise", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
                     { btnName: "grp_performance", label: "Performance", widgets: ["enable_fp16_accumulation", "sage_attention", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds", "chunks_feedforward", "clear_models_and_cache"] },
@@ -98,8 +98,7 @@ app.registerExtension({
                     "use_ollama": "Use local Ollama to visually describe inputs and revamp the prompt.",
                     "seed_number": "The specific generation seed.",
                     "control_before_generate": "Dictates how the seed changes BEFORE generating.",
-                    "target_width": "Target width of the final video.",
-                    "target_height": "Target height of the final video.",
+                    "target_resolution": "Target resolution of the final video.",
                     "length_in_seconds": "Total video length in seconds. In multi-shot mode, this will automatically round to the nearest whole number evenly divisible by your shot count.",
                     "frame_rate": "Target frames per second.",
                     "primary_steps": "Enter a single number for steps (e.g., 20), or a comma-separated list for manual sigmas (e.g., 1.0, 0.995, 0.99, 0.9875, 0.975, 0.65, 0.28, 0.07, 0.0).",
