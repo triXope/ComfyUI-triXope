@@ -421,7 +421,7 @@ class FilmAuteur_LTXV:
                 "spatial_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
                 "temporal_upscale": ("BOOLEAN", {"default": True}),
                 "temporal_denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
-                "restore_faces": ("BOOLEAN", {"default": True}),
+                "restore_faces": ("BOOLEAN", {"default": False}),
                 "facerestore_model": (get_trixope_facerestore_models(), {}),
                 "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"], {}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
