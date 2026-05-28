@@ -1493,30 +1493,36 @@ Output only the prompt. Nothing before it, nothing after it."""
                 chunk_v_masks = pass_v_masks[:, :, ctx_v_lat:curr_v_lat, :, :].clone()
                 
                 # --- DYNAMIC MASTER AUDIO SLICING (Anti-Squish Fix) ---
-                # 1. Absolute Start: Pinpoint the exact starting millisecond to prevent global drift.
                 ctx_v_frames = ((ctx_v_lat - 1) * 8) + 1 if ctx_v_lat > 0 else 0
                 true_a_start = get_audio_latents_func(ctx_v_frames, int(current_fps)) if ctx_v_frames > 0 else 0
                 
-                # 2. Relative Length: We MUST enforce the exact relative length the UNet expects.
-                # If we slice the absolute end point, VAE overlaps cause the slice to be 7 frames 
-                # too long, forcing PyTorch to squish the audio timeline!
                 chunk_v_len = curr_v_lat - ctx_v_lat
                 chunk_frames = ((chunk_v_len - 1) * 8) + 1 if chunk_v_len > 0 else 1
                 req_a_len = get_audio_latents_func(chunk_frames, int(current_fps))
                 
                 chunk_a_samples = audio_samples[:, :, true_a_start : true_a_start + req_a_len].clone()
-                chunk_a_masks = torch.zeros_like(chunk_a_samples)
                 
-                # 3. Universal Safety Pad (Catches any trailing matrix gaps)
+                # INTERNAL AUDIO FIX: Pull from the master mask! 
+                # (This is 0.0 for Source audio, but perfectly set to 1.0 for Internal audio!)
+                chunk_a_masks = audio_noise_mask[:, :, true_a_start : true_a_start + req_a_len].clone()
+                
                 if chunk_a_samples.shape[2] < req_a_len:
                     pad_len = req_a_len - chunk_a_samples.shape[2]
                     chunk_a_samples = torch.nn.functional.pad(chunk_a_samples, (0,0,0,pad_len), value=0)
                     chunk_a_masks = torch.nn.functional.pad(chunk_a_masks, (0,0,0,pad_len), value=0)
                 
-                # --- VISUAL HARD-LOCK ---
+                # --- VISUAL & AUDIO HARD-LOCK ---
                 if chunk_start_sec > shot_start_sec:
                     ctx_len = prev_v_lat - ctx_v_lat
                     chunk_v_masks[:, :, :ctx_len, :, :] = 0.0
+                    
+                    # If Internal or Reference Audio, capture the generated audio and write it to the Master Track!
+                    if not has_audio_input:
+                        ctx_a_frames = ((ctx_len - 1) * 8) + 1 if ctx_len > 0 else 0
+                        ctx_a_len = get_audio_latents_func(ctx_a_frames, int(current_fps)) if ctx_a_frames > 0 else 0
+                        if ctx_a_len > 0:
+                            lock_len = min(ctx_a_len, chunk_a_masks.shape[2])
+                            chunk_a_masks[:, :, :lock_len] = 0.0
 
                 # --- CONDITIONING PURGE (The Global Desync Fix) ---
                 # Text-to-Video works because it has no c_concat. Reference Mode breaks because the UNet 
@@ -1558,19 +1564,37 @@ Output only the prompt. Nothing before it, nothing after it."""
                 
                 sampled_chunk = primary_guider.sample(chunk_noise_obj.generate_noise(current_latent), current_latent["samples"], primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
                 
-                res_v, _ = sampled_chunk.unbind()  # Ignore the UNet's mangled audio output!
+                # INTERNAL AUDIO FIX: Unbind both Video AND Audio!
+                res_v, res_a = sampled_chunk.unbind()
                 res_v = res_v.to(device)
+                res_a = res_a.to(device)
                 
                 # Inject the generated chunk back into the isolated shot array
                 if chunk_start_sec == shot_start_sec:
                     pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v
+                    
+                    # If Internal or Reference Audio, capture the generated audio and write it to the Master Track!
+                    if not has_audio_input:
+                        actual_a_len = min(res_a.shape[2], curr_a_lat - prev_a_lat)
+                        pass_a_samples[:, :, prev_a_lat:prev_a_lat + actual_a_len] = res_a[:, :, :actual_a_len]
+                        audio_samples[:, :, true_a_start : true_a_start + actual_a_len] = res_a[:, :, :actual_a_len]
+                        
                 else:
                     gen_v_len = curr_v_lat - prev_v_lat
                     
                     # --- PURE HARD PASTE ---
-                    # Because we hard-locked the generation, we discard the context window output 
-                    # entirely and mathematically splice ONLY the brand new latents into the timeline!
                     pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v[:, :, -gen_v_len:]
+                    
+                    # If Internal or Reference Audio, lock the context overlap so it doesn't hallucinate over the past!
+                    if not has_audio_input:
+                        gen_a_len = curr_a_lat - prev_a_lat
+                        actual_gen_a = min(gen_a_len, res_a.shape[2])
+                        
+                        pass_a_samples[:, :, prev_a_lat:prev_a_lat + actual_gen_a] = res_a[:, :, -actual_gen_a:]
+                        
+                        # Dynamically update the Master Track so Chunk 3 can hear Chunk 2's context!
+                        true_a_end = true_a_start + req_a_len
+                        audio_samples[:, :, true_a_end - actual_gen_a : true_a_end] = res_a[:, :, -actual_gen_a:]
                 
                 chunk_idx += 1
                     
