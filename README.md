@@ -12,7 +12,7 @@ At first glance, I'm sure the node looks overwhelming, with so much packed into 
 
 # Nodes
 
-<b>triXope Film Auteur (LTXV)</b> - one node to rule them all!<br>
+<b>triXope Film Auteur (LTX)</b> - one node to rule them all!<br>
 A complete production-ready suite for LTX 2.3 featuring:<br>
 - Text-to-Video<br>
 - Image-to-Video<br>
