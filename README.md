@@ -19,6 +19,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Image Reference-to-Video (experimental work-in-progress)<br>
 - Audio-to-Video<br>
 - Audio Reference (with ID-LoRA)<br>
+- Optional text encode inputs
 - Ollama integration for prompt enhancement (Gemma 4 26b recommended)<br>
 - Normalized Attention Guidance (NAG) integration for negative prompting with low CFG
 - Length input as seconds (calculated & converted to frame count internally based on fps)<br>
@@ -30,6 +31,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Temporal upscaling option (doubles the framerate and improves motion, lip sync, and visual fidelity)<br>
 - Face restoration to help with cleaning up faces and removing artifacts<br>
 (place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. <a href="https://huggingface.co/models? search=codeformer">codeformer</a>, <a href="https://huggingface.co/models?search=gfpgan">GFPGAN</a>, etc.))<br>
+- Integrated Color Mastering featuring Color Correction, LUX Processing, Color Enhancements, Blur Effects, and Stylistic Effects
 - Integrated Audio Mastering Pass (Soft Limiter & Normalization)<br>
 - Built-in sageattention and fp16 accumulation (must be installed to use)<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
@@ -46,14 +48,6 @@ Road Map (upcoming features):<br>
 <br>
 <b>triXope LTXV Real-Time ETA:</b><br>
 - An assist node for triXope Film Auteur (LTXV) to display the countdown timer.<br>
-<br>
-<b>triXope ColorFX 🎬</b>
-Post-processing suite featuring:<br>
-- Color Correction<br>
-- LUX Processing<br>
-- Color Enhancements<br>
-- Blur Effects<br>
-- Stylistic Effects<br>
 <br>
 <b>triXope Directory File Selector 📂 (Live):</b><br>
 - Scrub local directory
