@@ -31,7 +31,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Temporal upscaling option (doubles the framerate and improves motion, lip sync, and visual fidelity)<br>
 - Face restoration to help with cleaning up faces and removing artifacts<br>
 (place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. <a href="https://huggingface.co/models? search=codeformer">codeformer</a>, <a href="https://huggingface.co/models?search=gfpgan">GFPGAN</a>, etc.))<br>
-- Integrated Color Mastering featuring Color Correction, LUX Processing, Color Enhancements, Blur Effects, and Stylistic Effects
+- Integrated Color Mastering, featuring Correction, LUX Processing, Enhancements, Blur, and Stylistic Effects
 - Integrated Audio Mastering Pass (Soft Limiter & Normalization)<br>
 - Built-in sageattention and fp16 accumulation (must be installed to use)<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
