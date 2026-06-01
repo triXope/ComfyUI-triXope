@@ -37,6 +37,7 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
 - Unload models & clear cache<br>
 - Built in stage 1 preview<br>
+- Collapse/Expand Connections under the context menu for hiding all wires and cleaning up workspace
 - Internal Real-Time ETA counter (with assist node)<br>
 
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br>
