@@ -19,9 +19,10 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Image Reference-to-Video (experimental work-in-progress)<br>
 - Audio-to-Video<br>
 - Audio Reference (with ID-LoRA)<br>
-- Optional text encode inputs
+- Optional positive and negative text encode inputs<br>
 - Ollama integration for prompt enhancement (Gemma 4 26b recommended)<br>
-- Normalized Attention Guidance (NAG) integration for negative prompting with low CFG
+- Added Ollama option for lyrics-to-script to transcribe song lyrics and generate a complete music video shot list<br>
+- Normalized Attention Guidance (NAG) integration for negative prompting with low CFG<br>
 - Length input as seconds (calculated & converted to frame count internally based on fps)<br>
 - Integrated "Director Mode" with multi-shot inferencing using "|" separators between prompts<br>
 - Image input accepts image batch for storyboard processing (1 shot per image coinciding with multi-prompt input) or reference images<br>
@@ -31,13 +32,13 @@ A complete production-ready suite for LTX 2.3 featuring:<br>
 - Temporal upscaling option (doubles the framerate and improves motion, lip sync, and visual fidelity)<br>
 - Face restoration to help with cleaning up faces and removing artifacts<br>
 (place face restore model with .pt or .pth file extension in "facerestore_models" folder (eg. <a href="https://huggingface.co/models? search=codeformer">codeformer</a>, <a href="https://huggingface.co/models?search=gfpgan">GFPGAN</a>, etc.))<br>
-- Integrated Color Mastering, featuring Correction, LUX Processing, Enhancements, Blur, and Stylistic Effects
+- Integrated Color Mastering, featuring Correction, LUX Processing, Enhancements, Blur, and Stylistic Effects<br>
 - Integrated Audio Mastering Pass (Soft Limiter & Normalization)<br>
 - Built-in sageattention and fp16 accumulation (must be installed to use)<br>
 - Built in chunk feed forward (to assist in computational efficiency)<br>
 - Unload models & clear cache<br>
 - Built in stage 1 preview<br>
-- Collapse/Expand Connections under the context menu for hiding all wires and cleaning up workspace
+- Collapse/Expand Connections under the context menu for hiding all wires and cleaning up workspace<br>
 - Internal Real-Time ETA counter (with assist node)<br>
 
 Just plug in your models, optional reference images and/or audio, set your desired paramerters, send it out to your preferred video save or combine node, and you're good-to-go.<br>
