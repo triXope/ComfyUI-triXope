@@ -14,6 +14,8 @@ At first glance, I'm sure the node looks overwhelming, with so much packed into 
 
 <b>triXope Film Auteur (LTX)</b> - one node to rule them all!<br>
 A complete production-ready suite for LTX 2.3 featuring:<br>
+- Multi-modular design with group segmentation for easy navigation
+- Show/Collapse Connections added to right-click context menu to hide wired connections to help minimize footprint
 - Text-to-Video<br>
 - Image-to-Video<br>
 - Image Reference-to-Video (experimental work-in-progress)<br>
