@@ -4,7 +4,7 @@ from aiohttp import web
 
 from .ColorFX import *
 from .DirectoryFileSelector import NODE_CLASS_MAPPINGS as DFS_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as DFS_DISPLAY_NAME_MAPPINGS
-from .filmauteur_ltxv import *
+from .filmauteur_ltx import *
 from .ltxv_eta_node import *
 
 @server.PromptServer.instance.routes.get("/gemini/get_files")
@@ -28,14 +28,14 @@ async def get_files_in_directory(request):
 
 NODE_CLASS_MAPPINGS = {
     "ColorFX": ColorFX,
-    "FilmAuteur_LTXV": FilmAuteur_LTXV,
+    "FilmAuteur_LTX": FilmAuteur_LTX,
     "LTXVPostSliceAV": LTXVPostSliceAV,
     "LTXV_ETA_Display": LTXV_ETA_Display,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ColorFX": "triXope ColorFX 🎬",
-    "FilmAuteur_LTXV": "triXope Film Auteur (LTXV)",
+    "FilmAuteur_LTX": "triXope Film Auteur (LTX)",
     "LTXVPostSliceAV": "triXope LTXV Trim A/V",
     "LTXV_ETA_Display": "triXope LTXV Real-Time ETA",
 }
