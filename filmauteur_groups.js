@@ -2,13 +2,38 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 app.registerExtension({
-    name: "triXope.FilmAuteur_LTXV.Groups",
+    name: "triXope.FilmAuteur_LTX.Groups",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "FilmAuteur_LTXV") {
+        if (nodeData.name === "FilmAuteur_LTX") {
 
             const onSerialize = nodeType.prototype.onSerialize;
             nodeType.prototype.onSerialize = function(o) {
+                // 1. Run standard serialization first
                 if (onSerialize) onSerialize.apply(this, arguments);
+
+                // 2. Reach directly into the JSON save file (o) and fix the port labels!
+                const fixJsonLabels = (jsonSlots, liveSlots) => {
+                    if (!jsonSlots || !liveSlots) return;
+                    for (let i = 0; i < jsonSlots.length; i++) {
+                        let jSlot = jsonSlots[i];
+                        let lSlot = liveSlots[i];
+                        
+                        // If the port was collapsed, inject its true stored name into the JSON
+                        if (lSlot && lSlot.has_old_label && lSlot.old_label) {
+                            jSlot.label = lSlot.old_label;
+                        } 
+                        // Failsafe: Never let ComfyUI save a blank string!
+                        else if (!jSlot.label || jSlot.label.trim() === "") {
+                            jSlot.label = jSlot.name; 
+                        }
+                    }
+                };
+                
+                // Repair the inputs and outputs in the save object
+                fixJsonLabels(o.inputs, this.inputs);
+                fixJsonLabels(o.outputs, this.outputs);
+
+                // 3. Clean up the custom widget values (Original functionality)
                 if (this.widgets && o.widgets_values) {
                     let cleanValues = [];
                     for (let i = 0; i < this.widgets.length; i++) {
@@ -70,6 +95,98 @@ app.registerExtension({
                 }
             };
 
+            // --- 3. RGTHREE-STYLE CONNECTIONS COLLAPSER ---
+            const oldGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
+            nodeType.prototype.getExtraMenuOptions = function(canvas, options) {
+                if (oldGetExtraMenuOptions) oldGetExtraMenuOptions.apply(this, arguments);
+                options.push(null); // Separator line
+                options.push({
+                    content: this.properties.collapse_connections ? "🟢 Expand Connections" : "▶ Collapse Connections",
+                    callback: () => {
+                        // 1. Log the starting height
+                        let oldMinY = this.computeSize()[1];
+                        
+                        this.properties.collapse_connections = !this.properties.collapse_connections;
+
+                        // 2. Toggle Labels to prevent text overlap (with Fallback Rescue)
+                        const toggleLabels = (slots) => {
+                            if (!slots) return;
+                            for (let cxn of slots) {
+                                if (this.properties.collapse_connections) {
+                                    if (!cxn.has_old_label) {
+                                        cxn.has_old_label = true;
+                                        // SAFE FALLBACK: Never trap an empty string as the true label!
+                                        cxn.old_label = (!cxn.label || cxn.label.trim() === "") ? cxn.name : cxn.label;
+                                    }
+                                    cxn.label = " ";
+                                } else {
+                                    if (cxn.has_old_label) {
+                                        cxn.has_old_label = false;
+                                        cxn.label = cxn.old_label || cxn.name;
+                                        delete cxn.old_label;
+                                    } else if (!cxn.label || cxn.label.trim() === "") {
+                                        cxn.label = cxn.name;
+                                    }
+                                }
+                            }
+                        };
+                        toggleLabels(this.inputs);
+                        toggleLabels(this.outputs);
+
+                        // 3. Calculate the exact delta shift and dynamically resize!
+                        let newMinY = this.computeSize()[1];
+                        let deltaY = newMinY - oldMinY;
+                        
+                        this.setSize([
+                            this.size[0], 
+                            Math.max(newMinY, this.size[1] + deltaY) 
+                        ]);
+                        app.graph.setDirtyCanvas(true, true);
+                    }
+                });
+            };
+
+            const oldGetInputPos = nodeType.prototype.getInputPos;
+            nodeType.prototype.getInputPos = function(slotNumber) {
+                return oldGetInputPos.call(this, this.properties.collapse_connections ? 0 : slotNumber);
+            };
+
+            const oldGetOutputPos = nodeType.prototype.getOutputPos;
+            nodeType.prototype.getOutputPos = function(slotNumber) {
+                return oldGetOutputPos.call(this, this.properties.collapse_connections ? 0 : slotNumber);
+            };
+
+            const oldGetConnectionPos = nodeType.prototype.getConnectionPos;
+            nodeType.prototype.getConnectionPos = function(isInput, slotNumber, out) {
+                return oldGetConnectionPos.call(this, isInput, this.properties.collapse_connections ? 0 : slotNumber, out);
+            };
+
+            // THE MIND TRICK: Safely calculate height without negative math crashes!
+            const oldComputeSize = nodeType.prototype.computeSize;
+            nodeType.prototype.computeSize = function(out) {
+                let tempInp, tempOut;
+                
+                // If collapsed, temporarily trick LiteGraph into thinking there is only 1 slot
+                if (this.properties.collapse_connections) {
+                    tempInp = this.inputs;
+                    tempOut = this.outputs;
+                    this.inputs = tempInp && tempInp.length > 0 ? [tempInp[0]] : [];
+                    this.outputs = tempOut && tempOut.length > 0 ? [tempOut[0]] : [];
+                }
+
+                // LiteGraph safely calculates the exact minimum height needed for the UI widgets!
+                let size = oldComputeSize.apply(this, arguments);
+
+                // Instantly restore the real slots before the UI renders
+                if (this.properties.collapse_connections) {
+                    this.inputs = tempInp;
+                    this.outputs = tempOut;
+                }
+                
+                return size;
+            };
+            // ----------------------------------------------
+
             const onNodeCreated = nodeType.prototype.onNodeCreated;
 
             nodeType.prototype.onNodeCreated = function () {
@@ -77,16 +194,32 @@ app.registerExtension({
                 this.properties = this.properties || {};
 
                 const groupDefinitions = [
-                    { btnName: "grp_mode", label: "Mode Select", widgets: ["video_mode", "image_strength", "img_compression", "audio_select", "identity_guidance_scale"] },
+                    { btnName: "grp_mode", label: "Mode Activation", widgets: ["primary_sampling", "spatial_upscale", "temporal_upscale", "restore_faces", "enable_colorfx", "video_mode", "image_strength", "img_compression", "audio_select", "identity_guidance_scale"] },
                     { btnName: "grp_prompting", label: "Prompting", widgets: ["character_descriptions", "location_description", "scene_descriptions", "use_ollama", "ollama_url", "ollama_model"] },
                     { btnName: "grp_specs", label: "Video Specs", widgets: ["seed_number", "control_before_generate", "target_resolution", "length_in_seconds", "frame_rate"] },
                     { btnName: "grp_sampling", label: "Primary Sampling", widgets: ["primary_sampler_name", "primary_cfg", "primary_steps", "eta", "bongmath", "enable_nag"] },
-                    { btnName: "grp_refinement", label: "Upscale & Refine", widgets: ["spatial_upscale", "spatial_passes", "spatial_sampler", "spatial_cfg", "spatial_sigmas", "temporal_upscale", "temporal_denoise", "restore_faces", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
+                    { btnName: "grp_refinement", label: "Upscale & Refine", widgets: ["spatial_passes", "spatial_sampler", "spatial_cfg", "spatial_sigmas", "temporal_denoise", "facerestore_model", "facedetection", "codeformer_fidelity", "face_restore_color_match", "face_restore_edge_blur", "face_restore_blend"] },
+                    
+                    // --- NESTED COLOR FX GROUPS ---
+                    { btnName: "grp_cfx_main", label: "Color FX", widgets: ["enable_color_correction", "enable_lut_processing", "enable_enhancements", "enable_blur_effects", "enable_stylistic_effects"] },
+                    { btnName: "grp_cfx_color", label: "Color Correction", parent: "grp_cfx_main", widgets: ["hdr_intensity", "shadow_intensity", "highlight_intensity", "gamma", "brightness", "contrast", "saturation", "enhance_color"] },
+                    { btnName: "grp_cfx_lut", label: "LUT Processing", parent: "grp_cfx_main", widgets: ["lut_name", "lut_strength", "lut_log_process"] },
+                    { btnName: "grp_cfx_enhancements", label: "Enhancements", parent: "grp_cfx_main", widgets: ["sharpness", "edge_enhance_strength", "detail_enhance_strength"] },
+                    { btnName: "grp_cfx_blur", label: "Blur Effects", parent: "grp_cfx_main", widgets: ["blur_radius", "gaussian_blur_radius", "radial_blur_strength", "radial_blur_center_x", "radial_blur_center_y", "radial_blur_focus_spread", "radial_blur_steps"] },
+                    { btnName: "grp_cfx_stylistic", label: "Stylistic Effects", parent: "grp_cfx_main", widgets: ["chromatic_aberration_r_x", "chromatic_aberration_r_y", "chromatic_aberration_b_x", "chromatic_aberration_b_y", "chromatic_blur_amount", "simple_film_grain_intensity", "simple_film_grain_monochrome", "scanline_intensity", "vignette_intensity", "vignette_center_x", "vignette_center_y", "soft_light_opacity", "soft_light_blur_radius"] },
+                    // ---------------------------
+                    
                     { btnName: "grp_performance", label: "Performance", widgets: ["enable_fp16_accumulation", "sage_attention", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds", "chunks_feedforward", "clear_models_and_cache"] },
                     { btnName: "grp_preview", label: "Preview", widgets: ["enable_preview", "stage1_preview"] }
                 ];
 
+                // THE TOOLTIPS
                 const WIDGET_TOOLTIPS = {
+                    "primary_sampling": "Enable to run the primary UNet generation. Disable to bypass directly to upscaling or output decoding.",
+                    "spatial_upscale": "Enable spatial upscaling to increase resolution.",
+                    "temporal_upscale": "Triggers the temporal upscaler on or off.",
+                    "restore_faces": "Apply CodeFormer face restoration to all frames. Requires a valid model selected below.",
+                    "enable_colorfx": "Enable the cinematic Color FX post-processing mastering suite.",
                     "video_mode": "text: generates from prompt only.\nimage: uses image as the first frame.\nreference: uses image globally as a style/concept reference.",
                     "image_strength": "Strength of the image conditioning. Values over 1.0 may cause artifacts or burning.",
                     "img_compression": "Compression applied to input images (CRF). 0 bypasses.",
@@ -105,11 +238,8 @@ app.registerExtension({
                     "eta": "Calculated noise amount to be added, then removed, after each step.",
                     "bongmath": "Injects BONGMATH parameter into extra_options.",
                     "enable_nag": "Enable Normalized Attention Guidance (NAG) to dramatically improve prompt adherence using optimal hidden settings.",
-                    "spatial_upscale": "Enable spatial upscaling to increase resolution.",
                     "spatial_passes": "Number of upscaling stages. 1 = One 2x upscale pass, 2 = Two 2x upscale passes (4x total resolution boost).",
-                    "temporal_upscale": "[TEMPORARILY DISABLED] Triggers the temporal upscaler on or off.",
                     "temporal_denoise": "Use a low denoise value between 0.15 and 0.35 for optimal temporal upscaling results.",
-                    "restore_faces": "Apply CodeFormer face restoration to all frames. Requires a valid model selected below.",
                     "facerestore_model": "Select the CodeFormer Face Restore Model.",
                     "facedetection": "Face detection model.",
                     "codeformer_fidelity": "Balance between quality and identity. 0 is high quality, 1 is high fidelity.",
@@ -141,7 +271,6 @@ app.registerExtension({
                             delete w.computeSize; 
                         }
                         w.tooltip = WIDGET_TOOLTIPS[w.name] || "";
-
                         if (w.inputEl) w.inputEl.title = w.tooltip;
                         if (w.element) w.element.title = w.tooltip;
                     } else {
@@ -149,15 +278,79 @@ app.registerExtension({
                             w.origComputeSize = w.hasOwnProperty('computeSize') ? w.computeSize : undefined;
                         }
                         w.computeSize = () => [0, 0];
-
                         w.y = undefined;
                         w.last_y = undefined;
-
                         w.tooltip = null; 
                     }
                 };
 
+                // --- HIERARCHICAL VISIBILITY ENGINE ---
+                const refreshGroupVisibility = () => {
+                    let oldMinY = this.computeSize()[1];
+
+                    for (let def of groupDefinitions) {
+                        // 1. Is this group's parent expanded? (If no parent, assume true)
+                        let isParentExpanded = def.parent ? this.properties["groupState_" + def.parent] : true;
+                        
+                        // 2. Is this specific group expanded?
+                        let isGroupExpanded = this.properties["groupState_" + def.btnName];
+                        
+                        // 3. Contents are only visible if BOTH this group AND its parent are expanded
+                        let contentsVisible = isParentExpanded && isGroupExpanded;
+
+                        // Safely toggle the subgroup's UI button itself based on the parent's visibility
+                        if (def.parent) {
+                            let btn = this.widgets.find(w => w.originalName === def.btnName);
+                            if (btn) toggleWidget(btn, isParentExpanded);
+                        }
+
+                        // Safely toggle all input widgets inside this group
+                        for (let wName of def.widgets) {
+                            let targetW = this.widgets.find(w => w.name === wName);
+                            if (targetW) toggleWidget(targetW, contentsVisible);
+                        }
+                    }
+
+                    // Dynamically calculate the delta required to fit the new UI state
+                    let newMinSize = this.computeSize();
+                    let deltaY = newMinSize[1] - oldMinY;
+                    this.setSize([
+                        Math.max(this.size[0], newMinSize[0]), 
+                        Math.max(newMinSize[1], this.size[1] + deltaY) 
+                    ]);
+                    app.graph.setDirtyCanvas(true, true);
+                };
+
                 setTimeout(() => {
+                    // Check if loaded in collapsed state and hide labels to prevent overlap
+                    if (this.properties.collapse_connections) {
+                        const wipe = (slots) => {
+                            if (!slots) return;
+                            for (let cxn of slots) {
+                                if (!cxn.has_old_label) {
+                                    cxn.has_old_label = true;
+                                    // SAFE FALLBACK: Rescue corrupted JSON saves!
+                                    cxn.old_label = (!cxn.label || cxn.label.trim() === "") ? cxn.name : cxn.label;
+                                }
+                                cxn.label = " ";
+                            }
+                        }
+                        wipe(this.inputs);
+                        wipe(this.outputs);
+                    } else {
+                        // If the workflow loaded expanded, but labels were corrupted by a prior save, rescue them!
+                        const rescue = (slots) => {
+                            if (!slots) return;
+                            for (let cxn of slots) {
+                                if (!cxn.label || cxn.label.trim() === "") {
+                                    cxn.label = cxn.name;
+                                    cxn.has_old_label = false;
+                                }
+                            }
+                        }
+                        rescue(this.inputs);
+                        rescue(this.outputs);
+                    }
                     let tempCtx = document.createElement("canvas").getContext("2d");
                     tempCtx.font = LiteGraph.WIDGET_TEXT_FONT || "12px Arial";
                     let longestLabelWidth = 0;
@@ -179,55 +372,39 @@ app.registerExtension({
                             }
                             let isExpanded = this.properties[propKey];
 
+                            // Generate the actual interactive button
                             let btn = this.addWidget("button", (isExpanded ? "▼ " : "▶ ") + def.label, null, () => {
-                                let oldMinY = this.computeSize()[1]; 
-
-                                isExpanded = !isExpanded;
-                                this.properties[propKey] = isExpanded; 
-                                btn.name = (isExpanded ? "▼ " : "▶ ") + def.label;
-
-                                for (let wName of def.widgets) {
-                                    let targetW = this.widgets.find(w => w.name === wName);
-                                    toggleWidget(targetW, isExpanded);
-                                }
-
-                                let newMinSize = this.computeSize();
-                                let deltaY = newMinSize[1] - oldMinY;
-
-                                this.setSize([
-                                    Math.max(this.size[0], newMinSize[0]), 
-                                    Math.max(newMinSize[1], this.size[1] + deltaY) 
-                                ]);
-
-                                app.graph.setDirtyCanvas(true, true);
+                                this.properties[propKey] = !this.properties[propKey];
+                                btn.name = (this.properties[propKey] ? "▼ " : "▶ ") + def.label;
+                                refreshGroupVisibility();
                             });
 
                             btn.isCustomGrouperBtn = true;
+                            btn.originalName = def.btnName; // Critical for finding it during the global visibility pass!
 
                             btn.draw = function(ctx, node, widget_width, y, H) {
-                                // 1. Draw the native button background
-                                ctx.fillStyle = LiteGraph.WIDGET_BGCOLOR || "#222";
-                                ctx.fillRect(15, y, widget_width - 30, H);
+                                let isSub = def.parent !== undefined;
+                                let indent = isSub ? 20 : 15; // Indent subgroups visually!
+                                let fillWidth = widget_width - indent - 15;
 
-                                // 2. Setup native text styling
+                                ctx.fillStyle = LiteGraph.WIDGET_BGCOLOR || "#222";
+                                ctx.fillRect(indent, y, fillWidth, H);
+
                                 ctx.fillStyle = LiteGraph.WIDGET_TEXT_COLOR || "#AFAFAF";
                                 ctx.font = LiteGraph.WIDGET_TEXT_FONT || "12px Arial";
-                                ctx.textAlign = "left"; // Override default centering
+                                ctx.textAlign = "left"; 
 
-                                // 3. Calculate perfectly centered left-justified anchor
-                                let x_start = (widget_width / 2) - (longestLabelWidth / 2);
+                                let x_start = (widget_width / 2) - (longestLabelWidth / 2) + (isSub ? 10 : 0);
                                 ctx.fillText(this.name, x_start, y + H * 0.7);
                             };
 
                             this.widgets.pop(); 
                             this.widgets.splice(dummyIndex, 0, btn);
-
-                            for (let wName of def.widgets) {
-                                let targetW = this.widgets.find(w => w.name === wName);
-                                toggleWidget(targetW, isExpanded);
-                            }
                         }
                     }
+                    
+                    // Run a final master visibility pass to sync all parents and children perfectly
+                    refreshGroupVisibility();
 
                     // --- FINAL LOAD-SIZE CALCULATION ---
 
@@ -361,7 +538,7 @@ api.addEventListener("executing", (event) => {
     if (!nodeId) return;
 
     const node = app.graph.getNodeById(nodeId);
-    if (node && node.type === "FilmAuteur_LTXV") {
+    if (node && node.type === "FilmAuteur_LTX") {
         let toggleWidget = node.widgets && node.widgets.find(w => w.name === "enable_preview");
         let previewWidget = node.widgets && node.widgets.find(w => w.name === "stage1_preview");
 
