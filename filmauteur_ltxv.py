@@ -24,6 +24,43 @@ import logging
 import av
 import random
 
+# --- COLORFX INJECTIONS ---
+from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageChops, ImageDraw
+import numpy as np
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+
+try:
+    from scipy.interpolate import RegularGridInterpolator
+    SCIPY_AVAILABLE = True
+    print("INFO: Scipy found. LUT application will be optimized.")
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("WARNING: Scipy not found. LUT application will use a slower pixel-by-pixel method if enabled.")
+
+try:
+    dir_luts = os.path.join(folder_paths.models_dir, "luts")
+    os.makedirs(dir_luts, exist_ok=True)
+    if "luts" not in folder_paths.folder_names_and_paths:
+        folder_paths.folder_names_and_paths["luts"] = ([dir_luts], {".cube"})
+    else:
+        folder_paths.folder_names_and_paths["luts"][1].add(".cube")
+        if dir_luts not in folder_paths.folder_names_and_paths["luts"][0]:
+             folder_paths.folder_names_and_paths["luts"][0].append(dir_luts)
+except Exception as e:
+    pass
+
+def tensor2pil(image: torch.Tensor) -> Image.Image:
+    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+
+def pil2tensor(image: Image.Image) -> torch.Tensor:
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+# --------------------------
+
 from server import PromptServer
 from comfy.ldm.modules.attention import wrap_attn, optimized_attention, attention_pytorch
 
@@ -362,10 +399,17 @@ RESOLUTION_OPTIONS = [
     "1536 × 3584 — Maximum resolution panoramic portrait"
 ]
 
-class FilmAuteur_LTXV:
+class FilmAuteur_LTX:
 
     @classmethod
     def INPUT_TYPES(cls):
+        lut_files = ["None"]
+        try:
+            raw_files = folder_paths.get_filename_list("luts")
+            if raw_files:
+                 lut_files.extend([f for f in raw_files if f.lower().endswith('.cube')])
+        except Exception as e: pass
+        
         sampler_names = comfy.samplers.SAMPLER_NAMES
         primary_default = "euler_ancestral" if "euler_ancestral" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
         upsample_default = "euler_cfg_pp" if "euler_cfg_pp" in sampler_names else ("euler" if "euler" in sampler_names else sampler_names[0])
@@ -378,9 +422,14 @@ class FilmAuteur_LTXV:
                 "audio_vae": ("VAE", {"tooltip": "The LTXV Audio VAE model."}),
                 "model1_primary": ("MODEL", {"tooltip": "The primary LTXV Model (will be patched if ID-LoRA is active)."}),
 
-                # --- GROUP: Mode Select ---
-                "grp_mode": (["▼ Mode Select"], {}),
-                "video_mode": (["text", "image", "reference"], {"default": "text"}),
+                # --- GROUP: Mode Activation ---
+                "grp_mode": (["▼ Mode Activation"], {}),
+                "primary_sampling": ("BOOLEAN", {"default": True}),
+                "spatial_upscale": ("BOOLEAN", {"default": True}),
+                "temporal_upscale": ("BOOLEAN", {"default": True}),
+                "restore_faces": ("BOOLEAN", {"default": True}),
+                "enable_colorfx": ("BOOLEAN", {"default": True}),
+                "video_mode": (["text-to-video", "image-to-video", "reference-to-video"], {"default": "text-to-video"}),
                 "image_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "img_compression": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
                 "audio_select": (["internal", "source", "reference"], {"default": "internal"}),
@@ -391,7 +440,7 @@ class FilmAuteur_LTXV:
                 "character_descriptions": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
                 "location_description": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
                 "scene_descriptions": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
-                "use_ollama": ("BOOLEAN", {"default": False}),
+                "use_ollama": (["disabled", "enhance prompt", "lyrics-to-script"], {"default": "disabled"}),
                 "ollama_url": ("STRING", {"default": "http://127.0.0.1:11434"}),
                 "ollama_model": (OLLAMA_MODELS,),
 
@@ -414,20 +463,74 @@ class FilmAuteur_LTXV:
 
                 # --- GROUP: Upscale & Refine ---
                 "grp_refinement": (["▼ Upscale & Refine"], {}),
-                "spatial_upscale": ("BOOLEAN", {"default": True}),
                 "spatial_passes": ("INT", {"default": 1, "min": 1, "max": 2}),
                 "spatial_sampler": (sampler_names, {"default": upsample_default}),
                 "spatial_cfg": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
                 "spatial_sigmas": ("STRING", {"multiline": False, "default": "0.55, 0.35, 0.15, 0.0"}),
-                "temporal_upscale": ("BOOLEAN", {"default": True}),
                 "temporal_denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
-                "restore_faces": ("BOOLEAN", {"default": False}),
                 "facerestore_model": (get_trixope_facerestore_models(), {}),
                 "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"], {}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "face_restore_color_match": ("BOOLEAN", {"default": True}),
                 "face_restore_edge_blur": ("BOOLEAN", {"default": True}),
                 "face_restore_blend": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05}),
+
+                # --- GROUP: Color FX (Master Parent) ---
+                "grp_cfx_main": (["▼ Color FX"], {}),
+                "enable_color_correction": ("BOOLEAN", {"default": True}),
+                "enable_lut_processing": ("BOOLEAN", {"default": True}),
+                "enable_enhancements": ("BOOLEAN", {"default": True}),
+                "enable_blur_effects": ("BOOLEAN", {"default": True}),
+                "enable_stylistic_effects": ("BOOLEAN", {"default": True}),
+                
+                # --- SUBGROUP: Color FX (Correction) ---
+                "grp_cfx_color": (["▼ Color Correction"], {}),
+                "hdr_intensity": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 3.0, "step": 0.01}),
+                "shadow_intensity": ("FLOAT", {"default": 0.10, "min": 0.00, "max": 2.00, "step": 0.01}),
+                "highlight_intensity": ("FLOAT", {"default": 0.20, "min": 0.00, "max": 2.00, "step": 0.01}),
+                "gamma": ("FLOAT", {"default": 1.00, "min": 0.10, "max": 5.00, "step": 0.01}),
+                "brightness": ("FLOAT", {"default": 1.00, "min": 0.00, "max": 3.00, "step": 0.01}),
+                "contrast": ("FLOAT", {"default": 0.75, "min": 0.00, "max": 3.00, "step": 0.01}),
+                "saturation": ("FLOAT", {"default": 0.90, "min": 0.00, "max": 3.00, "step": 0.01}),
+                "enhance_color": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 3.00, "step": 0.01}),
+
+                # --- SUBGROUP: Color FX (LUTs) ---
+                "grp_cfx_lut": (["▼ LUT Processing"], {}),
+                "lut_name": (lut_files, {"default": "None"}),
+                "lut_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "lut_log_process": ("BOOLEAN", {"default": True}),
+
+                # --- SUBGROUP: Color FX (Enhancements) ---
+                "grp_cfx_enhancements": (["▼ Enhancements"], {}),
+                "sharpness": ("FLOAT", {"default": 3.0, "min": -2.0, "max": 5.0, "step": 0.1}),
+                "edge_enhance_strength": ("FLOAT", {"default": 0.10, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "detail_enhance_strength": ("FLOAT", {"default": 0.20, "min": 0.00, "max": 1.00, "step": 0.01}),
+
+                # --- SUBGROUP: Color FX (Blur) ---
+                "grp_cfx_blur": (["▼ Blur Effects"], {}),
+                "blur_radius": ("INT", {"default": 0, "min": 0, "max": 64, "step": 1}),
+                "gaussian_blur_radius": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 64.0, "step": 0.1}),
+                "radial_blur_strength": ("FLOAT", {"default": 32.0, "min": 0.0, "max": 100.0, "step": 1.0}),
+                "radial_blur_center_x": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "radial_blur_center_y": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "radial_blur_focus_spread": ("FLOAT", {"default": 3.0, "min": 0.1, "max": 8.0, "step": 0.1}),
+                "radial_blur_steps": ("INT", {"default": 10, "min": 1, "max": 32, "step": 1}),
+
+                # --- SUBGROUP: Color FX (Stylistic) ---
+                "grp_cfx_stylistic": (["▼ Stylistic Effects"], {}),
+                "chromatic_aberration_r_x": ("FLOAT", {"default": 1.0, "min": -50.0, "max": 50.0, "step": 0.5}),
+                "chromatic_aberration_r_y": ("FLOAT", {"default": 0.0, "min": -50.0, "max": 50.0, "step": 0.5}),
+                "chromatic_aberration_b_x": ("FLOAT", {"default": -1.0, "min": -50.0, "max": 50.0, "step": 0.5}),
+                "chromatic_aberration_b_y": ("FLOAT", {"default": 0.0, "min": -50.0, "max": 50.0, "step": 0.5}),
+                "chromatic_blur_amount": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "simple_film_grain_intensity": ("FLOAT", {"default": 0.04, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "simple_film_grain_monochrome": ("BOOLEAN", {"default": True}),
+                "scanline_intensity": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 1.0}),
+                "vignette_intensity": ("FLOAT", {"default": 0.40, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "vignette_center_x": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "vignette_center_y": ("FLOAT", {"default": 0.50, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "soft_light_opacity": ("FLOAT", {"default": 0.30, "min": 0.00, "max": 1.00, "step": 0.01}),
+                "soft_light_blur_radius": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 50.0, "step": 0.1}),
 
                 # --- GROUP: Performance ---
                 "grp_performance": (["▼ Performance"], {}),
@@ -448,35 +551,170 @@ class FilmAuteur_LTXV:
                 "spatial_upscaler": ("LATENT_UPSCALE_MODEL", {"tooltip": "Connect the LTXV Spatial Upscale model here to upsample the video latent by 2x.", "forceInput": True}),
                 "model3_temporal": ("MODEL", {"tooltip": "Optional model for the temporal upscaler. If disconnected, model1_primary is used.", "forceInput": True}),
                 "temporal_upscaler": ("LATENT_UPSCALE_MODEL", {"tooltip": "Connect the LTXV Temporal Upscale model here to double the framerate.", "forceInput": True}),
-                "images": ("IMAGE", {"tooltip": "Input image batch for image-to-video or reference-to-video."}),
+                "positive": ("CONDITIONING", {"tooltip": "Optional override for the positive text conditioning."}),
+                "negative": ("CONDITIONING", {"tooltip": "Optional override for the negative text conditioning."}),
+                "image(s)": ("IMAGE", {"tooltip": "Input image batch for image-to-video or reference-to-video."}),
                 "audio": ("AUDIO", {"tooltip": "Connect audio here to encode it directly or use it as a voice reference for ID-LoRA."}),
+                "latent_override": ("LATENT", {"tooltip": "Optional latent override. Bypasses generation if primary_sampling is off, or acts as the base for Video-to-Video if on."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"}
         }
 
-    RETURN_TYPES = ("STRING", "LATENT", "LATENT", "LATENT", "VIDEO", "IMAGE", "AUDIO", "FLOAT", "INT", "ETA_TRACKER")
-    RETURN_NAMES = ("text_prompt(s)", "av_latent", "video_latent", "audio_latent", "video", "images", "audio", "fps", "ref_frame_count", "real_time_eta")
+    RETURN_TYPES = ("STRING", "CONDITIONING", "CONDITIONING", "LATENT", "LATENT", "LATENT", "VIDEO", "IMAGE", "AUDIO", "FLOAT", "INT", "ETA_TRACKER")
+    RETURN_NAMES = ("text_prompt(s)", "positive", "negative", "av_latent", "video_latent", "audio_latent", "video", "images", "audio", "fps", "ref_frame_count", "real_time_eta")
     FUNCTION = "process"
     CATEGORY = "triXope"
 
+    def _read_cube_file(self, filepath):
+        lines = []
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'): lines.append(line)
+        lut_size = 0
+        domain_min, domain_max = np.array([0.0, 0.0, 0.0], dtype=np.float32), np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        table_data_lines = []
+        for line in lines:
+            if line.startswith('LUT_3D_SIZE'): lut_size = int(line.split()[-1])
+            elif line.startswith('DOMAIN_MIN'): domain_min = np.array([float(x) for x in line.split()[1:]], dtype=np.float32)
+            elif line.startswith('DOMAIN_MAX'): domain_max = np.array([float(x) for x in line.split()[1:]], dtype=np.float32)
+            elif len(line.split()) == 3 and not line.startswith('TITLE'): table_data_lines.append(list(map(float, line.split())))
+        return np.array(table_data_lines, dtype=np.float32).reshape(lut_size, lut_size, lut_size, 3), lut_size, domain_min, domain_max
+
+    def _apply_lut_to_image_scipy(self, image_np_rgb_0_1, lut_data):
+        lut_table, lut_size, _, _ = lut_data
+        r_axis = g_axis = b_axis = np.linspace(0, 1, lut_size)
+        interp_R = RegularGridInterpolator((b_axis, g_axis, r_axis), lut_table[..., 0], bounds_error=False)
+        interp_G = RegularGridInterpolator((b_axis, g_axis, r_axis), lut_table[..., 1], bounds_error=False)
+        interp_B = RegularGridInterpolator((b_axis, g_axis, r_axis), lut_table[..., 2], bounds_error=False)
+        pts = image_np_rgb_0_1[..., [2, 1, 0]].reshape(-1, 3)
+        return np.clip(np.stack([interp_R(pts), interp_G(pts), interp_B(pts)], axis=-1).reshape(image_np_rgb_0_1.shape), 0.0, 1.0)
+
+    def _apply_lut_effect(self, pil_image, lut_name, strength, log_process):
+        if strength == 0.0 or lut_name == "None": return pil_image
+        lut_path = folder_paths.get_full_path("luts", lut_name)
+        if not lut_path or not SCIPY_AVAILABLE: return pil_image
+        lut_data = self._read_cube_file(lut_path)
+        img_np = np.array(pil_image, dtype=np.float32) / 255.0
+        orig = img_np.copy()
+        if log_process: img_np = np.power(np.clip(img_np, 1e-5, 1.0), 1.0 / 2.2)
+        out_np = self._apply_lut_to_image_scipy(img_np, lut_data)
+        if log_process: out_np = np.power(np.clip(out_np, 0.0, 1.0), 2.2)
+        blended = np.clip((1.0 - strength) * orig + strength * out_np, 0.0, 1.0)
+        return Image.fromarray((blended * 255).astype(np.uint8))
+
+    def _apply_shadows_highlights(self, pil_image, shadow_adj, highlight_adj, hdr_intensity):
+        if shadow_adj == 0.0 and highlight_adj == 0.0 and hdr_intensity == 1.0: return pil_image
+        img_array = np.array(pil_image, dtype=np.float32) / 255.0
+        if hdr_intensity != 1.0:
+            mean = np.mean(img_array)
+            img_array = mean + (img_array - mean) * (1.0 + (hdr_intensity - 1.0) * 0.5) 
+        lum = np.clip(0.299 * img_array[..., 0] + 0.587 * img_array[..., 1] + 0.114 * img_array[..., 2], 0.0, 1.0)[..., np.newaxis]
+        if shadow_adj > 0.0: img_array += (1.0 - lum) * shadow_adj
+        if highlight_adj > 0.0: img_array -= lum * highlight_adj
+        return Image.fromarray((np.clip(img_array, 0.0, 1.0) * 255).astype(np.uint8))
+
+    def _apply_color_enhancements(self, pil_image, b, c, s, ec):
+        if b != 1.: pil_image = ImageEnhance.Brightness(pil_image).enhance(b)
+        if c != 1.: pil_image = ImageEnhance.Contrast(pil_image).enhance(c)
+        if s * ec != 1.: pil_image = ImageEnhance.Color(pil_image).enhance(s * ec)
+        return pil_image
+
+    def _apply_sharpness_detail(self, pil_image, sh, ee, de):
+        if sh != 0.: pil_image = ImageEnhance.Sharpness(pil_image).enhance(1. + sh)
+        if ee > 0.: pil_image = Image.blend(pil_image, pil_image.filter(ImageFilter.EDGE_ENHANCE_MORE), ee)
+        if de > 0.: pil_image = Image.blend(pil_image, pil_image.filter(ImageFilter.DETAIL), de)
+        return pil_image
+
+    def _apply_blurs(self, pil_image, br, gbr):
+        if br > 0: pil_image = pil_image.filter(ImageFilter.BoxBlur(br))
+        if gbr > 0.: pil_image = pil_image.filter(ImageFilter.GaussianBlur(radius=gbr))
+        return pil_image
+
+    def _apply_chromatic_aberration(self, pil_image, rx, ry, bx, by, blur):
+        img = np.array(pil_image).astype(np.float32)
+        rc, gc, bc = img[...,0], img[...,1], img[...,2]
+        if blur > 0.: 
+            bk = int(blur * 2) * 2 + 1
+            rc, bc = cv2.GaussianBlur(rc, (bk, bk), blur), cv2.GaussianBlur(bc, (bk, bk), blur)
+        rs = cv2.warpAffine(rc, np.float32([[1, 0, rx], [0, 1, ry]]), (img.shape[1], img.shape[0]), borderMode=cv2.BORDER_REFLECT_101)
+        bs = cv2.warpAffine(bc, np.float32([[1, 0, bx], [0, 1, by]]), (img.shape[1], img.shape[0]), borderMode=cv2.BORDER_REFLECT_101)
+        return Image.fromarray(np.clip(cv2.merge([rs, gc, bs]), 0, 255).astype(np.uint8))
+
+    def _apply_radial_blur(self, pil_image, strength, cx_r, cy_r, spread, steps):
+        img = np.array(pil_image).astype(np.float32) / 255.
+        h, w = img.shape[:2]; cx, cy = int(w * cx_r), int(h * cy_r)
+        max_d = np.sqrt(max(cx**2+cy**2, (w-cx)**2+cy**2, cx**2+(h-cy)**2, (w-cx)**2+(h-cy)**2))
+        X, Y = np.meshgrid(np.arange(w) - cx, np.arange(h) - cy)
+        rad_mask = np.sqrt(X**2 + Y**2) / max(1., max_d)
+        blurred, cur_blur = [], strength
+        for _ in range(steps):
+            k = int(cur_blur)
+            blurred.append(cv2.GaussianBlur(img, (k | 1, k | 1), 0) if k > 0 else img.copy())
+            cur_blur /= spread
+        final = np.zeros_like(img)
+        for i in range(steps):
+            m_i = np.dstack([np.clip((rad_mask - i / steps) * steps, 0, 1)] * 3)
+            final = blurred[steps - 1 - i] * m_i + (final if i > 0 else img) * (1. - m_i)
+        return Image.fromarray(np.clip(final * 255, 0, 255).astype(np.uint8))
+
+    def _apply_scanlines(self, pil_image, intensity):
+        img = np.array(pil_image)
+        scan = np.ones(img.shape[:2], dtype=img.dtype)
+        scan[::2, :] = 1. - intensity
+        return Image.fromarray((img * np.dstack([scan]*3)).astype(np.uint8))
+
+    def _apply_soft_light(self, pil_image, opacity, blur_radius):
+        blur = pil_image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        return Image.blend(pil_image, ImageChops.soft_light(pil_image, blur), opacity)
+
+    def _apply_gamma_torch(self, tensor_images, gamma_value):
+        if gamma_value == 1.0: return tensor_images
+        return torch.pow(tensor_images.clamp(1e-5, 1.0), 1.0 / max(gamma_value, 0.01))
+
+    def _apply_simple_film_grain_torch(self, tensor_images, intensity, monochrome):
+        if intensity == 0.: return tensor_images
+        B, H, W, C = tensor_images.shape
+        noise = torch.randn((B, H, W, 1 if monochrome else C), device=tensor_images.device) * intensity
+        if monochrome and C > 1: noise = noise.repeat(1, 1, 1, C)
+        return (tensor_images + noise).clamp(0.0, 1.0)
+
+    def _apply_vignette_torch(self, tensor_images, intensity, cx_r, cy_r):
+        if intensity == 0.: return tensor_images
+        B, H, W, C = tensor_images.shape
+        cx, cy = W * cx_r, H * cy_r
+        Y, X = torch.meshgrid(torch.arange(H, device=tensor_images.device) - cy, torch.arange(W, device=tensor_images.device) - cx, indexing='ij')
+        dist = torch.sqrt(X**2 + Y**2)
+        max_dist = torch.sqrt(torch.tensor(max(cx**2+cy**2, (W-cx)**2+cy**2, cx**2+(H-cy)**2, (W-cx)**2+(H-cy)**2), device=tensor_images.device))
+        v_mask = (1.0 - (dist / max(1.0, max_dist))**2 * intensity).clamp(0.0, 1.0).unsqueeze(0).unsqueeze(-1)
+        return (tensor_images * v_mask).clamp(0.0, 1.0)
+
     def process(self, clip, video_vae, audio_vae, model1_primary, character_descriptions, location_description, scene_descriptions,
-                video_mode, image_strength, img_compression, audio_select, identity_guidance_scale,
+                primary_sampling, spatial_upscale, temporal_upscale, restore_faces, enable_colorfx, video_mode, image_strength, img_compression, audio_select, identity_guidance_scale,
                 use_ollama, ollama_url, ollama_model,
                 seed_number, control_before_generate, target_resolution, length_in_seconds, frame_rate,
                 primary_sampler_name, primary_cfg, primary_steps,
                 eta, bongmath, enable_nag,
-                spatial_upscale, spatial_passes, spatial_sampler, spatial_cfg, spatial_sigmas, temporal_upscale, temporal_denoise,
-                restore_faces, facerestore_model, facedetection, codeformer_fidelity,
+                spatial_passes, spatial_sampler, spatial_cfg, spatial_sigmas, temporal_denoise,
+                facerestore_model, facedetection, codeformer_fidelity,
                 face_restore_color_match, face_restore_edge_blur, face_restore_blend,
+                enable_color_correction, hdr_intensity, shadow_intensity, highlight_intensity, gamma, brightness, contrast, saturation, enhance_color,
+                enable_lut_processing, lut_name, lut_strength, lut_log_process,
+                enable_enhancements, sharpness, edge_enhance_strength, detail_enhance_strength,
+                enable_blur_effects, blur_radius, gaussian_blur_radius, radial_blur_strength, radial_blur_center_x, radial_blur_center_y, radial_blur_focus_spread, radial_blur_steps,
+                enable_stylistic_effects, chromatic_aberration_r_x, chromatic_aberration_r_y, chromatic_aberration_b_x, chromatic_aberration_b_y, chromatic_blur_amount, simple_film_grain_intensity, simple_film_grain_monochrome, scanline_intensity, vignette_intensity, vignette_center_x, vignette_center_y, soft_light_opacity, soft_light_blur_radius,
                 enable_fp16_accumulation, sage_attention, autoregressive_chunking, chunk_size_seconds, context_window_seconds, chunks_feedforward, clear_models_and_cache, enable_preview,
                 model2_spatial=None, spatial_upscaler=None, model3_temporal=None, temporal_upscaler=None,
-                images=None, audio=None, unique_id=None, **kwargs):
+                positive=None, negative=None, audio=None, latent_override=None, unique_id=None, **kwargs):
+
+        # --- EXTRACT THE ILLEGAL VARIABLE NAME FROM KWARGS ---
+        images = kwargs.get("image(s)", None)
 
         unique_id_val = unique_id[0] if isinstance(unique_id, list) else unique_id
 
         # --- MAP TO INTERNAL VARIABLES TO PRESERVE ALL MATH ---
-        bypass_img_ref = (video_mode != "reference")
-        bypass_first_frame = (video_mode != "image")
+        bypass_img_ref = (video_mode != "reference-to-video")
+        bypass_first_frame = (video_mode != "image-to-video")
         
         image_ref = images if not bypass_img_ref else None
         first_frame = images if not bypass_first_frame else None
@@ -620,13 +858,78 @@ class FilmAuteur_LTXV:
                 ).movedim(1, -1)
             return img
 
+        # --- LYRICS-TO-SCRIPT: WHISPER TRANSCRIPTION ENGINE ---
+        if use_ollama == "lyrics-to-script":
+            if audio is None:
+                print("\nLTXV Custom Warning: 'lyrics-to-script' selected but no audio provided. Falling back to manual scene_descriptions.")
+            else:
+                print("\n--- Transcribing Audio for Lyrics-to-Script ---")
+                try:
+                    from transformers import WhisperProcessor, WhisperForConditionalGeneration
+
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    waveform = audio["waveform"][0]
+                    sample_rate = audio["sample_rate"]
+                    target_sr = 16000
+
+                    if sample_rate != target_sr:
+                        waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
+
+                    if waveform.dim() == 2 and waveform.shape[0] > 1:
+                        waveform = waveform.mean(dim=0)
+                    waveform = waveform.squeeze()
+
+                    model_name = "openai/whisper-large-v3"
+                    print(f"-> Loading {model_name} (This may take a moment on first run)...")
+                    processor = WhisperProcessor.from_pretrained(model_name)
+                    model = WhisperForConditionalGeneration.from_pretrained(model_name).to(device).eval()
+
+                    max_length = target_sr * 30  # Process in 30 second chunks to prevent OOM
+                    total_len = waveform.size(0)
+                    chunks = [waveform[i:i + max_length] for i in range(0, total_len, max_length)]
+
+                    transcriptions = []
+                    for chunk in chunks:
+                        # Pad short chunks
+                        if chunk.size(0) < max_length:
+                            pad_len = max_length - chunk.size(0)
+                            chunk = torch.nn.functional.pad(chunk, (0, pad_len))
+
+                        inputs = processor(chunk, sampling_rate=target_sr, return_tensors="pt", padding="longest", truncation=False)
+                        input_features = inputs["input_features"].to(model.device)
+
+                        generated_ids = model.generate(input_features)
+                        text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                        transcriptions.append(text.strip())
+
+                    # Combine chunks and split by punctuation to simulate distinct "Lines" of lyrics
+                    full_text = " ".join(transcriptions).strip()
+                    phrases = [p.strip() for p in re.split(r'[.,!?\n]+', full_text) if p.strip()]
+                    
+                    if not phrases:
+                        phrases = ["(Instrumental audio)"]
+                        
+                    # OVERWRITE the manual text box entirely!
+                    scene_descriptions = " | ".join(phrases)
+                    print(f"-> Transcription Complete! Generated {len(phrases)} lyrical scenes.")
+                    print(f"-> Extracted Lyrics: {scene_descriptions}")
+                    
+                    # Clean up VRAM immediately so we have room for generation
+                    del model
+                    del processor
+                    comfy.model_management.soft_empty_cache()
+                except ImportError:
+                    print("\nLTXV Custom Error: 'transformers' or 'torchaudio' library missing. Falling back to manual scenes.")
+                except Exception as e:
+                    print(f"\nLTXV Custom Error during transcription: {e}. Falling back to manual scenes.")
+
         raw_prompts = [p.strip() for p in scene_descriptions.split("|") if p.strip()]
         num_prompts = len(raw_prompts)
         if num_prompts == 0:
             raw_prompts = [""]
             num_prompts = 1
 
-        override_char_desc = (not bypass_img_ref) and (image_ref is not None) and use_ollama
+        override_char_desc = (not bypass_img_ref) and (image_ref is not None) and (use_ollama in ["enhance prompt", "lyrics-to-script"])
         c_desc = character_descriptions.strip()
         l_desc = location_description.strip()
 
@@ -652,7 +955,7 @@ class FilmAuteur_LTXV:
             chunk_size_seconds = length_in_seconds / num_prompts
             print(f"\n--- Multi-Shot Director Mode Active: Timeline synced to {num_prompts} shots ({chunk_size_seconds:.2f}s per shot). ---")
 
-        if use_ollama:
+        if use_ollama in ["enhance prompt", "lyrics-to-script"]:
             print(f"\n--- Querying Ollama ({ollama_model}) for Multi-Shot Enhancement ---")
 
             def create_grid_b64(tensor_list):
@@ -761,10 +1064,30 @@ Output only the prompt. Nothing before it, nothing after it."""
 
                 grid_b64 = create_grid_b64(tensors_to_grid) if tensors_to_grid else None
 
-                user_message = {
-                    "role": "user",
-                    "content": f"This is Shot {i+1} of a multi-shot sequence. Base prompt: {p}\n\nAnalyze the provided reference image grid and generate the final LTX-Video prompt for this specific shot."
-                }
+                # --- CINEMATIC SHOT VARIETY ENGINE ---
+                # A carefully curated rotation of focal distances to guarantee dynamic editing pacing
+                shot_scales = [
+                    "wide establishing shot",
+                    "intimate close-up",
+                    "medium tracking shot",
+                    "low angle extreme wide shot",
+                    "medium close-up",
+                    "extreme close-up macro shot",
+                    "wide sweeping crane shot"
+                ]
+                # Rotate through the list based on the current shot index
+                assigned_scale = shot_scales[i % len(shot_scales)]
+
+                if use_ollama == "lyrics-to-script":
+                    user_message = {
+                        "role": "user",
+                        "content": f"This is Shot {i+1} of a music video sequence. MANDATORY CAMERA FRAMING: You must frame this specific shot as a **{assigned_scale}**.\n\nThe prompt below contains the characters, the location, and the specific sung lyric for this exact shot:\n\n{p}\n\nAct as a music video director. Generate a cohesive, highly detailed visual prompt that blends the characters and location with the emotion of the lyric. CRITICAL INSTRUCTION: You MUST explicitly describe the main character actively singing, performing, or lip-syncing the words in the scene. Do not just describe their mood; describe them physically singing. You must also explicitly describe the camera perspective using the {assigned_scale}."
+                    }
+                else:
+                    user_message = {
+                        "role": "user",
+                        "content": f"This is Shot {i+1} of a multi-shot sequence. MANDATORY CAMERA FRAMING: You must frame this specific shot as a **{assigned_scale}**.\n\nBase prompt: {p}\n\nAnalyze the provided reference image grid and generate the final LTX-Video prompt. You must explicitly describe the camera perspective using the {assigned_scale}."
+                    }
 
                 if grid_b64:
                     user_message["images"] = [grid_b64]
@@ -819,28 +1142,50 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         final_positive = []
         final_prompt_strings = []
-        for i, p in enumerate(prompt_list):
-            modified_prompt = f"{hidden_prefix}{p}{hidden_suffix}"
-            final_prompt_strings.append(modified_prompt)
-            tokens = clip.tokenize(modified_prompt)
-            out = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
-            cond = out.pop("cond")
-            c_dict = out.copy() if isinstance(out, dict) else {}
-            c_dict["start_percent"] = 0.0 
-            c_dict["end_percent"] = 1.0
-            c_dict["frame_rate"] = current_fps 
-            final_positive.append([cond, c_dict])
+        
+        # --- POSITIVE OVERRIDE ---
+        if positive is not None:
+            print("\n--- Positive Conditioning Override Detected ---")
+            final_prompt_strings.append("--- Custom Positive Conditioning Override Active ---")
+            for i in range(num_prompts):
+                # Safely map external conditioning elements to our internal multi-shot arrays
+                idx = min(i, len(positive) - 1)
+                cond_t, cond_d = positive[idx][0], positive[idx][1].copy()
+                cond_d["frame_rate"] = float(current_fps)
+                final_positive.append([cond_t, cond_d])
+        else:
+            for i, p in enumerate(prompt_list):
+                modified_prompt = f"{hidden_prefix}{p}{hidden_suffix}"
+                final_prompt_strings.append(modified_prompt)
+                tokens = clip.tokenize(modified_prompt)
+                out = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+                cond = out.pop("cond")
+                c_dict = out.copy() if isinstance(out, dict) else {}
+                c_dict["start_percent"] = 0.0 
+                c_dict["end_percent"] = 1.0
+                c_dict["frame_rate"] = float(current_fps)
+                final_positive.append([cond, c_dict])
 
         final_prompt_string_out = " | ".join(final_prompt_strings)
 
-        tokens_neg = clip.tokenize(negative_prompt)
-        out_neg = clip.encode_from_tokens(tokens_neg, return_pooled=True, return_dict=True)
-        cond_neg = out_neg.pop("cond")
-        dict_neg = out_neg.copy() if isinstance(out_neg, dict) else {}
-        dict_neg["start_percent"] = 0.000
-        dict_neg["end_percent"] = 1.000
-        dict_neg["frame_rate"] = current_fps 
-        final_negative = [[cond_neg, dict_neg]]
+        # --- NEGATIVE OVERRIDE ---
+        if negative is not None:
+            print("--- Negative Conditioning Override Detected ---")
+            final_negative = []
+            for i in range(num_prompts):
+                idx = min(i, len(negative) - 1)
+                cond_t, cond_d = negative[idx][0], negative[idx][1].copy()
+                cond_d["frame_rate"] = float(current_fps)
+                final_negative.append([cond_t, cond_d])
+        else:
+            tokens_neg = clip.tokenize(negative_prompt)
+            out_neg = clip.encode_from_tokens(tokens_neg, return_pooled=True, return_dict=True)
+            cond_neg = out_neg.pop("cond")
+            dict_neg = out_neg.copy() if isinstance(out_neg, dict) else {}
+            dict_neg["start_percent"] = 0.000
+            dict_neg["end_percent"] = 1.000
+            dict_neg["frame_rate"] = float(current_fps)
+            final_negative = [[cond_neg, dict_neg]]
 
         # ==========================================
         # 2. CALCULATE 'A' AND ASSEMBLE SETUP REFERENCES
@@ -903,8 +1248,35 @@ Output only the prompt. Nothing before it, nothing after it."""
         device = comfy.model_management.intermediate_device()
         batch_size = 1 
 
-        video_samples = torch.zeros([batch_size, 128, latent_count, initial_height // 32, initial_width // 32], device=device)
-        video_samples = comfy.sample.fix_empty_latent_channels(model1_primary, video_samples, None)
+        # --- LATENT OVERRIDE EXTRACTION ---
+        v_override = None
+        a_override = None
+        if latent_override is not None:
+            print("\n--- Latent Override Detected ---")
+            samples = latent_override.get("samples", latent_override) 
+            if getattr(samples, "is_nested", False) or isinstance(samples, comfy.nested_tensor.NestedTensor):
+                v_override, a_override = samples.unbind()
+            elif isinstance(samples, (list, tuple)) and len(samples) == 2:
+                v_override, a_override = samples[0], samples[1]
+            else:
+                v_override = samples
+                
+        # --- APPLY OVERRIDE TO TIMELINE MATH ---
+        if v_override is not None:
+            print("-> Overriding timeline and resolution math to match injected tensor.")
+            video_samples = v_override.to(device).clone()
+            batch_size, _, latent_count, v_h, v_w = video_samples.shape
+            initial_height = v_h * 32
+            initial_width = v_w * 32
+            frame_length = int(((latent_count - 1) * 8) + 1)
+            length_in_seconds = frame_length / current_fps
+            pure_latents_per_shot = latent_count // num_prompts
+            setup_latents = 0
+            shot_seconds = length_in_seconds / num_prompts
+        else:
+            video_samples = torch.zeros([batch_size, 128, latent_count, initial_height // 32, initial_width // 32], device=device)
+            video_samples = comfy.sample.fix_empty_latent_channels(model1_primary, video_samples, None)
+            
         video_noise_mask = torch.ones((batch_size, video_samples.shape[2], video_samples.shape[3], video_samples.shape[4]), dtype=torch.float32, device=device)
 
         z_channels = getattr(audio_vae, "latent_channels", audio_vae.first_stage_model.latent_channels)
@@ -914,7 +1286,11 @@ Output only the prompt. Nothing before it, nothing after it."""
         get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
         if get_audio_latents_func is None:
             raise AttributeError("Audio VAE is missing 'num_of_latents_from_frames' method.")
-        num_audio_latents = get_audio_latents_func(frame_length, int(current_fps))
+            
+        if a_override is not None:
+            num_audio_latents = a_override.shape[2]
+        else:
+            num_audio_latents = get_audio_latents_func(frame_length, int(current_fps))
 
         total_silence_samples = int(((frame_length / current_fps) + 5.0) * sampling_rate)
         silent_wf = torch.zeros((batch_size, 2, total_silence_samples), dtype=torch.float32, device=device)
@@ -929,28 +1305,37 @@ Output only the prompt. Nothing before it, nothing after it."""
             true_silence_latent = audio_vae.first_stage_model.encode(silent_wf_mapped).to(device)
         
         audio_samples = torch.zeros((batch_size, z_channels, num_audio_latents, audio_freq), device=device)
-        use_silence_len = min(num_audio_latents, true_silence_latent.shape[2])
-        audio_samples[:, :, :use_silence_len, :] = true_silence_latent[:, :, :use_silence_len, :]
+        
+        if a_override is not None:
+            use_len = min(num_audio_latents, a_override.shape[2])
+            audio_samples[:, :, :use_len, :] = a_override[:, :, :use_len, :]
+        else:
+            use_silence_len = min(num_audio_latents, true_silence_latent.shape[2])
+            if use_silence_len > 0:
+                audio_samples[:, :, :use_silence_len, :] = true_silence_latent[:, :, :use_silence_len, :]
+                
         audio_noise_mask = torch.ones_like(audio_samples)
 
         # ==========================================
         # 3.4 HELPER: LATENT COUNTER
         # ==========================================
         def get_latent_counts(sec):
-            # 0-Index the absolute start
             if sec <= 0.0:
                 return 0, 0
                 
-            # Map continuous seconds to our isolated shot blocks!
             shot_idx = int(sec // shot_seconds)
             if shot_idx >= num_prompts:
                 shot_idx = num_prompts - 1
                 
             remainder_sec = sec - (shot_idx * shot_seconds)
             
-            # If the remainder is functionally zero, we are exactly on a shot boundary!
+            # ACCORDION FIX: Calculate exact isolated audio length for one full shot to prevent continuous drift!
+            get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
+            base_a_lat_per_shot = get_audio_latents_func(frames_per_shot, int(current_fps))
+            
             if remainder_sec <= 0.001:
                 v_lat = shot_idx * latents_per_shot
+                a_lat = shot_idx * base_a_lat_per_shot
             else:
                 if bypass_img_ref:
                     raw_frames = int((remainder_sec * current_fps) + 1)
@@ -961,14 +1346,11 @@ Output only the prompt. Nothing before it, nothing after it."""
                 if local_v_lat < 1: local_v_lat = 1
                 
                 v_lat = (shot_idx * latents_per_shot) + local_v_lat
-            
-            # Map audio perfectly to the 0-indexed video latents
-            synced_frames = int(((v_lat - 1) * 8) + 1) if v_lat > 0 else 1
-            get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
-            a_lat = get_audio_latents_func(synced_frames, int(current_fps))
-            
-            if v_lat == 0:
-                a_lat = 0
+                
+                local_synced_frames = int(((local_v_lat - 1) * 8) + 1) if local_v_lat > 0 else 1
+                local_a_lat = get_audio_latents_func(local_synced_frames, int(current_fps))
+                
+                a_lat = (shot_idx * base_a_lat_per_shot) + local_a_lat
                 
             return v_lat, a_lat
 
@@ -1024,11 +1406,14 @@ Output only the prompt. Nothing before it, nothing after it."""
             if wf.shape[0] != batch_size:
                 wf = wf.repeat(batch_size, 1, 1)[:batch_size]
 
+            # THE FIX: Removed the 20-second chunking limit. 
+            # Encoding as one continuous waveform prevents the 8-frame VAE boundary seam!
             wf_mapped = wf.movedim(1, -1).to(vae_device)
             try:
                 latents = audio_vae.encode(wf_mapped).to(device)
             except AttributeError:
                 latents = audio_vae.first_stage_model.encode(wf_mapped).to(device)
+
             return wf, latents
 
         silent_wf = torch.zeros((batch_size, 2, total_samples), dtype=torch.float32, device=device)
@@ -1089,12 +1474,31 @@ Output only the prompt. Nothing before it, nothing after it."""
                 pass1_pixels = comfy.utils.common_upscale(pass1_pixels.movedim(-1, 1), t_width, t_height, "bilinear", "center").movedim(1, -1)
 
             encoded_t = video_vae.encode(pass1_pixels[:, :, :, :3])
+            
+            # Inject into Shot 1 (Default behavior)
             frames_to_inject = min(encoded_t.shape[2], video_samples.shape[2])
             video_samples[:, :, :frames_to_inject] = encoded_t[:, :, :frames_to_inject]
 
             for i in range(frames_to_inject):
                 pixel_idx = min(i * time_scale_factor, max(0, len(strengths) - 1))
                 video_noise_mask[:, i, :, :] = 1.0 - strengths[pixel_idx]
+                
+            # IDENTITY FIX: If Reference-to-Video is active, we MUST inject this exact setup block into Shots 2+ as well!
+            if not bypass_img_ref and num_prompts > 1:
+                shot_duration = length_in_seconds / num_prompts
+                for s in range(1, num_prompts):
+                    sec = s * shot_duration
+                    v_lat, _ = get_latent_counts(sec)
+                    
+                    inject_len = min(encoded_t.shape[2], video_samples.shape[2] - v_lat)
+                    if inject_len > 0:
+                        video_samples[:, :, v_lat : v_lat + inject_len] = encoded_t[:, :, :inject_len]
+                        
+                        for i in range(inject_len):
+                            pixel_idx = min(i * time_scale_factor, max(0, len(strengths) - 1))
+                            video_noise_mask[:, v_lat + i, :, :] = 1.0 - strengths[pixel_idx]
+                            
+                        print(f"-> Identity Setup Block injected into Shot {s+1} at {sec:.2f}s (Latent Frame {v_lat})")
 
         # 4.5 MULTI-SHOT DIRECTOR CUT INJECTIONS
         if not bypass_first_frame and first_frame is not None and num_prompts > 1 and autoregressive_chunking:
@@ -1219,11 +1623,34 @@ Output only the prompt. Nothing before it, nothing after it."""
             else:
                 wf_lora = actual_cond_audio["waveform"]
 
-            wf_lora_mapped = wf_lora.movedim(1, -1).to(vae_device)
-            try:
-                audio_latents_lora = audio_vae.encode(wf_lora_mapped).to(device)
-            except AttributeError:
-                audio_latents_lora = audio_vae.first_stage_model.encode(wf_lora_mapped).to(device)
+            max_samps = int(20.0 * vae_sample_rate)
+            if wf_lora.shape[2] > max_samps:
+                lats = []
+                for i in range(0, wf_lora.shape[2], max_samps):
+                    chunk_wf = wf_lora[:, :, i:i+max_samps]
+                    if chunk_wf.shape[2] < 4000:
+                        chunk_wf = torch.nn.functional.pad(chunk_wf, (0, 4000 - chunk_wf.shape[2]))
+                    
+                    wf_lora_mapped = chunk_wf.movedim(1, -1).to(vae_device)
+                    try: lats.append(audio_vae.encode(wf_lora_mapped).to(device))
+                    except AttributeError: lats.append(audio_vae.first_stage_model.encode(wf_lora_mapped).to(device))
+                audio_latents_lora = torch.cat(lats, dim=2)
+            else:
+                max_samps = int(20.0 * vae_sample_rate)
+                if wf_lora.shape[2] > max_samps:
+                    lats = []
+                    for i in range(0, wf_lora.shape[2], max_samps):
+                        chunk_wf = wf_lora[:, :, i:i+max_samps]
+                        if chunk_wf.shape[2] < 2400:
+                            continue
+                        wf_lora_mapped = chunk_wf.movedim(1, -1).to(vae_device)
+                        try: lats.append(audio_vae.encode(wf_lora_mapped).to(device))
+                        except AttributeError: lats.append(audio_vae.first_stage_model.encode(wf_lora_mapped).to(device))
+                    audio_latents_lora = torch.cat(lats, dim=2)
+                else:
+                    wf_lora_mapped = wf_lora.movedim(1, -1).to(vae_device)
+                    try: audio_latents_lora = audio_vae.encode(wf_lora_mapped).to(device)
+                    except AttributeError: audio_latents_lora = audio_vae.first_stage_model.encode(wf_lora_mapped).to(device)
             
             b_, c_, t_, f_ = audio_latents_lora.shape
             ref_tokens = audio_latents_lora.permute(0, 2, 1, 3).reshape(b_, t_, c_ * f_)
@@ -1346,271 +1773,359 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # 6.5 UNIFIED AUTOREGRESSIVE & ISOLATED SAMPLING LOOP
         # ==========================================
-        print(f"\n--- Base Generation Active: Building {num_prompts} Isolated Shot(s) ---")
+        pure_image_passthrough = False
         
-        # --- BASE TEXTURE & TIMING LOCK ---
-        # Generate pristine global noise for the entire video to prevent sliding hallucinations!
-        global_base_v_noise = comfy.sample.prepare_noise(video_samples, seed_number, None).to(device)
-        global_base_a_noise = comfy.sample.prepare_noise(audio_samples, seed_number, None).to(device)
-        
-        class BaseSlicedNoise:
-            def __init__(self, v_noise, a_noise, v_start, a_start):
-                self.v_noise = v_noise
-                self.a_noise = a_noise
-                self.v_start = v_start
-                self.a_start = a_start
-                
-            def generate_noise(self, input_latent):
-                v_len = input_latent["samples"].unbind()[0].shape[2]
-                a_len = input_latent["samples"].unbind()[1].shape[2]
-                return comfy.nested_tensor.NestedTensor((
-                    self.v_noise[:, :, self.v_start : self.v_start + v_len].clone(),
-                    self.a_noise[:, :, self.a_start : self.a_start + a_len].clone()
-                ))
+        if primary_sampling:
+            print(f"\n--- Base Generation Active: Building {num_prompts} Isolated Shot(s) ---")
+            
+            # --- BASE TEXTURE & TIMING LOCK ---
+            # Generate pristine global noise for the entire video to prevent sliding hallucinations!
+            global_base_v_noise = comfy.sample.prepare_noise(video_samples, seed_number, None).to(device)
+            global_base_a_noise = comfy.sample.prepare_noise(audio_samples, seed_number, None).to(device)
+            
+            class BaseSlicedNoise:
+                def __init__(self, v_noise, a_noise, v_start, a_start):
+                    self.v_noise = v_noise
+                    self.a_noise = a_noise
+                    self.v_start = v_start
+                    self.a_start = a_start
+                    
+                def generate_noise(self, input_latent):
+                    v_len = input_latent["samples"].unbind()[0].shape[2]
+                    a_len = input_latent["samples"].unbind()[1].shape[2]
+                    
+                    v_slice = self.v_noise[:, :, self.v_start : self.v_start + v_len].clone()
+                    a_slice = self.a_noise[:, :, self.a_start : self.a_start + a_len].clone()
+                    
+                    # ROUNDING FAILSAFE: Pad the noise tensors if multi-shot math exceeds the master timeline!
+                    if v_slice.shape[2] < v_len:
+                        pad_len = v_len - v_slice.shape[2]
+                        v_slice = torch.nn.functional.pad(v_slice, (0, 0, 0, 0, 0, pad_len))
+                        
+                    if a_slice.shape[2] < a_len:
+                        pad_len = a_len - a_slice.shape[2]
+                        a_slice = torch.nn.functional.pad(a_slice, (0, 0, 0, pad_len))
+                        
+                    return comfy.nested_tensor.NestedTensor((v_slice, a_slice))
 
-        isolated_v_shots = []
-        isolated_a_shots = []
-        
-        shot_duration = length_in_seconds / num_prompts
-        
-        # 0-Indexed local timeline mappers
-        def sec_to_v_idx(sec):
-            if sec <= 0.0: return 0
-            frames = int(sec * current_fps) + 1 if bypass_img_ref else int(a * duplicate_frames) + int(sec * current_fps) + 9
-            return ((frames - 1) // 8) + 1
+            isolated_v_shots = []
+            isolated_a_shots = []
             
-        def sec_to_a_idx(sec):
-            if sec <= 0.0: return 0
-            frames = int(sec * current_fps) + 1 if bypass_img_ref else int(a * duplicate_frames) + int(sec * current_fps) + 9
-            synced_frames = int(((((frames - 1) // 8) + 1) - 1) * 8) + 1
-            get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
-            return get_audio_latents_func(synced_frames, int(current_fps))
+            shot_duration = length_in_seconds / num_prompts
+            
+            # 0-Indexed local timeline mappers
+            def sec_to_v_idx(sec):
+                if sec <= 0.0: return 0
+                frames = int(sec * current_fps) + 1 if bypass_img_ref else int(a * duplicate_frames) + int(sec * current_fps) + 9
+                return ((frames - 1) // 8) + 1
+                
+            def sec_to_a_idx(sec):
+                if sec <= 0.0: return 0
+                frames = int(sec * current_fps) + 1 if bypass_img_ref else int(a * duplicate_frames) + int(sec * current_fps) + 9
+                synced_frames = int(((((frames - 1) // 8) + 1) - 1) * 8) + 1
+                get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
+                return get_audio_latents_func(synced_frames, int(current_fps))
 
-        v_len = sec_to_v_idx(shot_duration)
-        a_len = sec_to_a_idx(shot_duration)
-        
-        x0_output = {}
-        for s in range(num_prompts):
-            shot_start_sec = s * shot_duration
-            shot_end_sec = (s + 1) * shot_duration
+            v_len = sec_to_v_idx(shot_duration)
+            a_len = sec_to_a_idx(shot_duration)
             
-            # Simulate the chunking math to get the exact total chunks for this shot
-            total_chunks_in_shot = 0
-            temp_sec = shot_start_sec
-            while temp_sec < shot_end_sec:
-                total_chunks_in_shot += 1
-                if not autoregressive_chunking:
-                    temp_sec = shot_end_sec
-                else:
-                    temp_sec = min(temp_sec + chunk_size_seconds, shot_end_sec)
-            
-            print(f"\n-> Generating Isolated Shot {s+1}/{num_prompts} (Total Chunks: {total_chunks_in_shot})...")
-            
-            # Map absolute global latents to determine exact local length
-            base_v_lat, base_a_lat = get_latent_counts(shot_start_sec)
-            end_v_lat, end_a_lat = get_latent_counts(shot_end_sec)
-            
-            v_len = end_v_lat - base_v_lat
-            a_len = end_a_lat - base_a_lat
-            
-            # 1. Create a pristine, empty latent block for this specific shot
-            pass_v_samples = torch.zeros([batch_size, 128, v_len, initial_height // 32, initial_width // 32], device=device)
-            pass_v_samples = comfy.sample.fix_empty_latent_channels(model1_primary, pass_v_samples, None)
-            pass_v_masks = torch.ones_like(pass_v_samples)
-            
-            pass_a_samples = torch.zeros([batch_size, z_channels, a_len, audio_freq], device=device)
-            pass_a_masks = torch.ones_like(pass_a_samples)
-            
-            # 2. Inject Reference Images uniquely into this shot's slot
-            if s == 0 and final_pixels is not None:
-                encoded_t = video_vae.encode(final_pixels[:, :, :, :3]).to(device)
-                frames_to_inject = min(encoded_t.shape[2], pass_v_samples.shape[2])
-                pass_v_samples[:, :, :frames_to_inject] = encoded_t[:, :, :frames_to_inject]
-                for i in range(frames_to_inject):
-                    pixel_idx = min(i * time_scale_factor, max(0, len(strengths) - 1))
-                    # EXACT 5D INDEXING: Target the frames, not the channels!
-                    pass_v_masks[:, :, i, :, :] = 1.0 - strengths[pixel_idx]
-            elif first_frame is not None and not bypass_first_frame:
-                img_idx = min(s, first_frame.shape[0] - 1)
-                img = first_frame[img_idx:img_idx+1]
-                t_width = pass_v_samples.shape[4] * width_scale_factor
-                t_height = pass_v_samples.shape[3] * height_scale_factor
-                img_scaled = comfy.utils.common_upscale(img.movedim(-1, 1), t_width, t_height, "bilinear", "center").movedim(1, -1)
-                encoded_img = video_vae.encode(img_scaled[:, :, :, :3]).to(device)
-                inject_len = min(encoded_img.shape[2], pass_v_samples.shape[2])
-                if inject_len > 0:
-                    pass_v_samples[:, :, :inject_len] = encoded_img[:, :, :inject_len]
-                    for j in range(inject_len):
-                        # EXACT 5D INDEXING: Target the frames, not the channels!
-                        pass_v_masks[:, :, j, :, :] = 1.0 - first_frame_str
+            x0_output = {}
+            for s in range(num_prompts):
+                shot_start_sec = s * shot_duration
+                shot_end_sec = (s + 1) * shot_duration
+                
+                # Simulate the chunking math to get the exact total chunks for this shot
+                total_chunks_in_shot = 0
+                temp_sec = shot_start_sec
+                while temp_sec < shot_end_sec:
+                    total_chunks_in_shot += 1
+                    if not autoregressive_chunking:
+                        temp_sec = shot_end_sec
+                    else:
+                        temp_sec = min(temp_sec + chunk_size_seconds, shot_end_sec)
+                
+                print(f"\n-> Generating Isolated Shot {s+1}/{num_prompts} (Total Chunks: {total_chunks_in_shot})...")
+                
+                # Map absolute global latents to determine exact local length
+                base_v_lat, base_a_lat = get_latent_counts(shot_start_sec)
+                end_v_lat, end_a_lat = get_latent_counts(shot_end_sec)
+                
+                v_len = end_v_lat - base_v_lat
+                a_len = end_a_lat - base_a_lat
+                
+                # 1. Pull the initial latents and masks from the master setup tensors (Enables V2V & Image Injections!)
+                pass_v_samples = torch.zeros([batch_size, 128, v_len, initial_height // 32, initial_width // 32], device=device)
+                pass_v_masks = torch.ones_like(pass_v_samples)
+                
+                actual_v_len = min(end_v_lat, video_samples.shape[2]) - base_v_lat
+                if actual_v_len > 0:
+                    pass_v_samples[:, :, :actual_v_len] = video_samples[:, :, base_v_lat:base_v_lat+actual_v_len]
+                    # FIX: video_noise_mask is 4D [B, F, H, W]. We slice it and unsqueeze the channel dimension to broadcast to 5D!
+                    pass_v_masks[:, :, :actual_v_len, :, :] = video_noise_mask[:, base_v_lat:base_v_lat+actual_v_len, :, :].unsqueeze(1)
+                
+                pass_a_samples = torch.zeros([batch_size, z_channels, a_len, audio_freq], device=device)
+                pass_a_masks = torch.ones_like(pass_a_samples)
+                
+                # 2. Slice the correct audio chunk for this shot
+                a_start_master = base_a_lat
+                a_end_master = min(end_a_lat, audio_samples.shape[2])
+                actual_a_len = a_end_master - a_start_master
+                if actual_a_len > 0:
+                    pass_a_samples[:, :, :actual_a_len] = audio_samples[:, :, a_start_master:a_end_master]
+                    pass_a_masks[:, :, :actual_a_len] = audio_noise_mask[:, :, a_start_master:a_end_master]
+                    
+                # 4. Autoregressive Inner Chunking Loop!
+                curr_global_sec = shot_start_sec
+                chunk_idx = 1
+                while curr_global_sec < shot_end_sec:
+                    comfy.model_management.soft_empty_cache()
+                    chunk_start_sec = curr_global_sec
+                    
+                    # Respect UI Settings for chunking boundaries
+                    if not autoregressive_chunking:
+                        curr_global_sec = shot_end_sec
+                    else:
+                        curr_global_sec = min(chunk_start_sec + chunk_size_seconds, shot_end_sec)
+                    
+                    curr_v_global, curr_a_global = get_latent_counts(curr_global_sec)
+                    prev_v_global, prev_a_global = get_latent_counts(chunk_start_sec)
+                    
+                    # Zero-indexed local array matching
+                    curr_v_lat = curr_v_global - base_v_lat
+                    curr_a_lat = curr_a_global - base_a_lat
+                    prev_v_lat = prev_v_global - base_v_lat
+                    prev_a_lat = prev_a_global - base_a_lat
+                    
+                    if chunk_start_sec == shot_start_sec:
+                        ctx_v_lat = 0
+                        ctx_a_lat = 0
+                        # INITIALIZATION FIX: Define the start time for Chunk 1 so the audio math doesn't crash!
+                        context_start_sec = shot_start_sec
+                        print(f"   -> [Shot {s+1}/{num_prompts} - Chunk {chunk_idx}/{total_chunks_in_shot}] 0.0s to {curr_global_sec - shot_start_sec:.2f}s (Base Block)")
+                    else:
+                        context_start_sec = max(shot_start_sec, chunk_start_sec - context_window_seconds)
+                        ctx_v_global, ctx_a_global = get_latent_counts(context_start_sec)
+                        ctx_v_lat = ctx_v_global - base_v_lat
+                        ctx_a_lat = ctx_a_global - base_a_lat
+                        print(f"   -> [Shot {s+1}/{num_prompts} - Chunk {chunk_idx}/{total_chunks_in_shot}] {chunk_start_sec - shot_start_sec:.2f}s to {curr_global_sec - shot_start_sec:.2f}s (Context Lookback: {chunk_start_sec - context_start_sec:.2f}s)")
                         
-            # 3. Slice the correct audio chunk for this shot
-            a_start_master = base_a_lat
-            a_end_master = min(end_a_lat, audio_samples.shape[2])
-            actual_a_len = a_end_master - a_start_master
-            if actual_a_len > 0:
-                pass_a_samples[:, :, :actual_a_len] = audio_samples[:, :, a_start_master:a_end_master]
-                pass_a_masks[:, :, :actual_a_len] = audio_noise_mask[:, :, a_start_master:a_end_master]
-                
-            # 4. Autoregressive Inner Chunking Loop!
-            curr_global_sec = shot_start_sec
-            chunk_idx = 1
-            while curr_global_sec < shot_end_sec:
-                comfy.model_management.soft_empty_cache()
-                chunk_start_sec = curr_global_sec
-                
-                # Respect UI Settings for chunking boundaries
-                if not autoregressive_chunking:
-                    curr_global_sec = shot_end_sec
-                else:
-                    curr_global_sec = min(chunk_start_sec + chunk_size_seconds, shot_end_sec)
-                
-                curr_v_global, curr_a_global = get_latent_counts(curr_global_sec)
-                prev_v_global, prev_a_global = get_latent_counts(chunk_start_sec)
-                
-                # Zero-indexed local array matching
-                curr_v_lat = curr_v_global - base_v_lat
-                curr_a_lat = curr_a_global - base_a_lat
-                prev_v_lat = prev_v_global - base_v_lat
-                prev_a_lat = prev_a_global - base_a_lat
-                
-                if chunk_start_sec == shot_start_sec:
-                    ctx_v_lat = 0
-                    ctx_a_lat = 0
-                    # INITIALIZATION FIX: Define the start time for Chunk 1 so the audio math doesn't crash!
-                    context_start_sec = shot_start_sec
-                    print(f"   -> [Shot {s+1}/{num_prompts} - Chunk {chunk_idx}/{total_chunks_in_shot}] 0.0s to {curr_global_sec - shot_start_sec:.2f}s (Base Block)")
-                else:
-                    context_start_sec = max(shot_start_sec, chunk_start_sec - context_window_seconds)
-                    ctx_v_global, ctx_a_global = get_latent_counts(context_start_sec)
-                    ctx_v_lat = ctx_v_global - base_v_lat
-                    ctx_a_lat = ctx_a_global - base_a_lat
-                    print(f"   -> [Shot {s+1}/{num_prompts} - Chunk {chunk_idx}/{total_chunks_in_shot}] {chunk_start_sec - shot_start_sec:.2f}s to {curr_global_sec - shot_start_sec:.2f}s (Context Lookback: {chunk_start_sec - context_start_sec:.2f}s)")
+                    # Slice the temporary chunk from the isolated shot tensor
+                    chunk_v_len = curr_v_lat - ctx_v_lat
+                    chunk_v_samples = pass_v_samples[:, :, ctx_v_lat:curr_v_lat]
+                    chunk_v_masks = pass_v_masks[:, :, ctx_v_lat:curr_v_lat, :, :].clone()
                     
-                # Slice the temporary chunk from the isolated shot tensor
-                chunk_v_len = curr_v_lat - ctx_v_lat
-                chunk_v_samples = pass_v_samples[:, :, ctx_v_lat:curr_v_lat]
-                chunk_v_masks = pass_v_masks[:, :, ctx_v_lat:curr_v_lat, :, :].clone()
-                
-                # --- DYNAMIC MASTER AUDIO SLICING (Anti-Squish Fix) ---
-                ctx_v_frames = ((ctx_v_lat - 1) * 8) + 1 if ctx_v_lat > 0 else 0
-                true_a_start = get_audio_latents_func(ctx_v_frames, int(current_fps)) if ctx_v_frames > 0 else 0
-                
-                chunk_v_len = curr_v_lat - ctx_v_lat
-                chunk_frames = ((chunk_v_len - 1) * 8) + 1 if chunk_v_len > 0 else 1
-                req_a_len = get_audio_latents_func(chunk_frames, int(current_fps))
-                
-                chunk_a_samples = audio_samples[:, :, true_a_start : true_a_start + req_a_len].clone()
-                
-                # INTERNAL AUDIO FIX: Pull from the master mask! 
-                # (This is 0.0 for Source audio, but perfectly set to 1.0 for Internal audio!)
-                chunk_a_masks = audio_noise_mask[:, :, true_a_start : true_a_start + req_a_len].clone()
-                
-                if chunk_a_samples.shape[2] < req_a_len:
-                    pad_len = req_a_len - chunk_a_samples.shape[2]
-                    chunk_a_samples = torch.nn.functional.pad(chunk_a_samples, (0,0,0,pad_len), value=0)
-                    chunk_a_masks = torch.nn.functional.pad(chunk_a_masks, (0,0,0,pad_len), value=0)
-                
-                # --- VISUAL & AUDIO HARD-LOCK ---
-                if chunk_start_sec > shot_start_sec:
-                    ctx_len = prev_v_lat - ctx_v_lat
-                    chunk_v_masks[:, :, :ctx_len, :, :] = 0.0
+                    # --- DYNAMIC MASTER AUDIO SLICING (Absolute Sync Fix) ---
+                    _, true_a_start = get_latent_counts(context_start_sec)
+                    _, true_a_end = get_latent_counts(curr_global_sec)
                     
-                    # If Internal or Reference Audio, capture the generated audio and write it to the Master Track!
-                    if not has_audio_input:
-                        ctx_a_frames = ((ctx_len - 1) * 8) + 1 if ctx_len > 0 else 0
-                        ctx_a_len = get_audio_latents_func(ctx_a_frames, int(current_fps)) if ctx_a_frames > 0 else 0
-                        if ctx_a_len > 0:
-                            lock_len = min(ctx_a_len, chunk_a_masks.shape[2])
-                            chunk_a_masks[:, :, :lock_len] = 0.0
+                    req_a_len = true_a_end - true_a_start
+                    true_a_start = max(0, true_a_start)
+                    
+                    # THE USER'S FIX: Pause audio conditioning during Ref Mode setup frames!
+                    if s > 0 and not bypass_img_ref:
+                        a_setup_latents = get_audio_latents_func(out_ref_frame_count, int(current_fps))
+                        base_a_lat_per_shot = get_audio_latents_func(frames_per_shot, int(current_fps))
+                        action_a_latents = base_a_lat_per_shot - a_setup_latents
+                        
+                        # Reset the clock: use local shot boundaries to prevent accumulating drift!
+                        local_a_start = true_a_start - base_a_lat
+                        setup_chunk_len = max(0, min(req_a_len, a_setup_latents - local_a_start))
+                        action_chunk_len = req_a_len - setup_chunk_len
+                        
+                        chunk_a_samples = torch.zeros((batch_size, z_channels, req_a_len, audio_freq), device=device)
+                        chunk_a_masks = torch.ones_like(chunk_a_samples)
+                        
+                        if setup_chunk_len > 0:
+                            # We are inside the setup frames pause period. Feed it silence!
+                            fill_len = min(setup_chunk_len, true_silence_latent.shape[2])
+                            chunk_a_samples[:, :, :fill_len] = true_silence_latent[:, :, :fill_len]
+                            
+                        if action_chunk_len > 0:
+                            # Post-setup action frames. Feed it the delayed audio!
+                            action_offset = max(0, local_a_start - a_setup_latents)
+                            audio_read_start = a_setup_latents + (s * action_a_latents) + action_offset
+                            
+                            src_end = min(audio_read_start + action_chunk_len, audio_samples.shape[2])
+                            copy_len = src_end - audio_read_start
+                            
+                            if copy_len > 0:
+                                chunk_a_samples[:, :, setup_chunk_len : setup_chunk_len + copy_len] = audio_samples[:, :, audio_read_start : src_end]
+                                chunk_a_masks[:, :, setup_chunk_len : setup_chunk_len + copy_len] = audio_noise_mask[:, :, audio_read_start : src_end]
+                    else:
+                        # THE TRUE INVERSE 4-FRAME SHIFT
+                        # Since shifting left (-) worsened the drift from 4 to 8, it mathematically proves 
+                        # the audio was arriving too early. We must shift the read index RIGHT (+) 
+                        # by exactly 4 frames to neutralize the VAE temporal offset!
+                        if has_audio_input and chunk_start_sec > shot_start_sec:
+                            shift_frames = 4
+                            base_lats = get_audio_latents_func(1, int(current_fps))
+                            shift_lats = get_audio_latents_func(1 + shift_frames, int(current_fps)) - base_lats
+                            
+                            local_a_start = true_a_start + shift_lats
+                        else:
+                            local_a_start = true_a_start
+                            
+                        # Safe slicing to prevent out-of-bounds errors when shifting right
+                        available_lats = max(0, audio_samples.shape[2] - local_a_start)
+                        slice_len = min(req_a_len, available_lats)
+                        
+                        chunk_a_samples = audio_samples[:, :, local_a_start : local_a_start + slice_len].clone()
+                        chunk_a_masks = audio_noise_mask[:, :, local_a_start : local_a_start + slice_len].clone()
+                        
+                        # Pad the tail with zeroes if the right-shift pushed us past the end of the master tensor
+                        if chunk_a_samples.shape[2] < req_a_len:
+                            pad_len = req_a_len - chunk_a_samples.shape[2]
+                            chunk_a_samples = torch.nn.functional.pad(chunk_a_samples, (0,0,0,pad_len), value=0)
+                            chunk_a_masks = torch.nn.functional.pad(chunk_a_masks, (0,0,0,pad_len), value=0)
+                    
+                    # --- VISUAL & AUDIO HARD-LOCK ---
+                    if chunk_start_sec > shot_start_sec:
+                        ctx_len = prev_v_lat - ctx_v_lat
+                        chunk_v_masks[:, :, :ctx_len, :, :] = 0.0
+                        
+                        # If Internal or Reference Audio, capture the generated audio and write it to the Master Track!
+                        if not has_audio_input:
+                            ctx_a_frames = ((ctx_len - 1) * 8) + 1 if ctx_len > 0 else 0
+                            ctx_a_len = get_audio_latents_func(ctx_a_frames, int(current_fps)) if ctx_a_frames > 0 else 0
+                            if ctx_a_len > 0:
+                                lock_len = min(ctx_a_len, chunk_a_masks.shape[2])
+                                chunk_a_masks[:, :, :lock_len] = 0.0
 
-                # --- CONDITIONING PURGE (The Global Desync Fix) ---
-                # Text-to-Video works because it has no c_concat. Reference Mode breaks because the UNet 
-                # blindly concatenates the 17-frame image to EVERY chunk, stretching the video tensor!
-                # We MUST strip the image conditioning from Chunk 2+ so it relies purely on the video context.
-                
-                # 1. Safely isolate and unpack the specific shot condition (No for-loop needed!)
-                p_tensor, p_dict_orig = final_positive[s]
-                p_dict = p_dict_orig.copy()
-                if chunk_start_sec > shot_start_sec and "c_concat" in p_dict:
-                    del p_dict["c_concat"]
-                chunk_pos = [[p_tensor, p_dict]]
+                    # --- CONDITIONING PURGE (The Global Desync Fix) ---
+                    # Text-to-Video works because it has no c_concat. Reference Mode breaks because the UNet 
+                    # blindly concatenates the 17-frame image to EVERY chunk, stretching the video tensor!
+                    # We MUST strip the image conditioning from Chunk 2+ so it relies purely on the video context.
                     
-                # 2. Safely iterate through the global negative conditions
-                chunk_neg = []
-                for n in final_negative:
-                    n_dict = n[1].copy()
-                    if chunk_start_sec > shot_start_sec and "c_concat" in n_dict:
-                        del n_dict["c_concat"]
-                    chunk_neg.append([n[0], n_dict])
-                    
-                # Apply the purged conditioning to the guider for this specific chunk!
-                primary_guider.set_conds(chunk_pos, chunk_neg)
-                base_cb = latent_preview.prepare_callback(primary_guider.model_patcher, primary_sigmas.shape[-1] - 1, x0_output)
-                
-                # Update the callback string so the ComfyUI progress bar reflects the exact chunk!
-                callback = wrap_callback(base_cb, f"Shot {s+1}/{num_prompts} (Chunk {chunk_idx}/{total_chunks_in_shot})")
-                
-                # SLICE THE GLOBAL NOISE: Anchors the UNet's context to the absolute timeline!
-                abs_v_start = base_v_lat + ctx_v_lat
-                abs_a_start = base_a_lat + ctx_a_lat
-                chunk_noise_obj = BaseSlicedNoise(global_base_v_noise, global_base_a_noise, abs_v_start, abs_a_start)
-                
-                # --- THE MISSING DICTIONARY & NESTED TENSOR FIX ---
-                # Restore the lines that package the audio and video into ComfyUI's required formats
-                av_samples = comfy.nested_tensor.NestedTensor((chunk_v_samples, chunk_a_samples))
-                av_masks = comfy.nested_tensor.NestedTensor((chunk_v_masks, chunk_a_masks))
-                current_latent = {"samples": av_samples}
-                
-                sampled_chunk = primary_guider.sample(chunk_noise_obj.generate_noise(current_latent), current_latent["samples"], primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
-                
-                # INTERNAL AUDIO FIX: Unbind both Video AND Audio!
-                res_v, res_a = sampled_chunk.unbind()
-                res_v = res_v.to(device)
-                res_a = res_a.to(device)
-                
-                # Inject the generated chunk back into the isolated shot array
-                if chunk_start_sec == shot_start_sec:
-                    pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v
-                    
-                    # If Internal or Reference Audio, capture the generated audio and write it to the Master Track!
-                    if not has_audio_input:
-                        actual_a_len = min(res_a.shape[2], curr_a_lat - prev_a_lat)
-                        pass_a_samples[:, :, prev_a_lat:prev_a_lat + actual_a_len] = res_a[:, :, :actual_a_len]
-                        audio_samples[:, :, true_a_start : true_a_start + actual_a_len] = res_a[:, :, :actual_a_len]
+                    # 1. Safely isolate and unpack the specific shot condition (No for-loop needed!)
+                    p_tensor, p_dict_orig = final_positive[s]
+                    p_dict = p_dict_orig.copy()
+                    if chunk_start_sec > shot_start_sec and "c_concat" in p_dict:
+                        del p_dict["c_concat"]
+                    chunk_pos = [[p_tensor, p_dict]]
                         
-                else:
-                    gen_v_len = curr_v_lat - prev_v_lat
-                    
-                    # --- PURE HARD PASTE ---
-                    pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v[:, :, -gen_v_len:]
-                    
-                    # If Internal or Reference Audio, lock the context overlap so it doesn't hallucinate over the past!
-                    if not has_audio_input:
-                        gen_a_len = curr_a_lat - prev_a_lat
-                        actual_gen_a = min(gen_a_len, res_a.shape[2])
+                    # 2. Safely iterate through the global negative conditions
+                    chunk_neg = []
+                    for n in final_negative:
+                        n_dict = n[1].copy()
+                        if chunk_start_sec > shot_start_sec and "c_concat" in n_dict:
+                            del n_dict["c_concat"]
+                        chunk_neg.append([n[0], n_dict])
                         
-                        pass_a_samples[:, :, prev_a_lat:prev_a_lat + actual_gen_a] = res_a[:, :, -actual_gen_a:]
-                        
-                        # Dynamically update the Master Track so Chunk 3 can hear Chunk 2's context!
-                        true_a_end = true_a_start + req_a_len
-                        audio_samples[:, :, true_a_end - actual_gen_a : true_a_end] = res_a[:, :, -actual_gen_a:]
-                
-                chunk_idx += 1
+                    # Apply the purged conditioning to the guider for this specific chunk!
+                    primary_guider.set_conds(chunk_pos, chunk_neg)
+                    base_cb = latent_preview.prepare_callback(primary_guider.model_patcher, primary_sigmas.shape[-1] - 1, x0_output)
                     
-            # End of Autoregressive Loop for Shot S
-            isolated_v_shots.append(pass_v_samples)
-            isolated_a_shots.append(pass_a_samples)
+                    # Update the callback string so the ComfyUI progress bar reflects the exact chunk!
+                    callback = wrap_callback(base_cb, f"Shot {s+1}/{num_prompts} (Chunk {chunk_idx}/{total_chunks_in_shot})")
+                    
+                    # SLICE THE GLOBAL NOISE: Anchors the UNet's context to the absolute timeline!
+                    abs_v_start = base_v_lat + ctx_v_lat
+                    abs_a_start = base_a_lat + ctx_a_lat
+                    chunk_noise_obj = BaseSlicedNoise(global_base_v_noise, global_base_a_noise, abs_v_start, abs_a_start)
+                    
+                    # --- THE MISSING DICTIONARY & NESTED TENSOR FIX ---
+                    # Restore the lines that package the audio and video into ComfyUI's required formats
+                    av_samples = comfy.nested_tensor.NestedTensor((chunk_v_samples, chunk_a_samples))
+                    av_masks = comfy.nested_tensor.NestedTensor((chunk_v_masks, chunk_a_masks))
+                    current_latent = {"samples": av_samples}
+                    
+                    if hasattr(model_to_use.model, "likeness_state"):
+                        model_to_use.model.likeness_state["is_shot_start"] = (chunk_start_sec == shot_start_sec)
+                        
+                    sampled_chunk = primary_guider.sample(chunk_noise_obj.generate_noise(current_latent), current_latent["samples"], primary_sampler, primary_sigmas, denoise_mask=av_masks, callback=callback, disable_pbar=disable_pbar, seed=seed_number)
+                    
+                    # INTERNAL AUDIO FIX: Unbind both Video AND Audio!
+                    res_v, res_a = sampled_chunk.unbind()
+                    res_v = res_v.to(device)
+                    res_a = res_a.to(device)
+                    
+                    # BATCH DIMENSION FAILSAFE: PyTorch unbind occasionally drops the batch dimension!
+                    # Force tensors back to 5D (Video) and 4D (Audio) to protect the frame slicing math!
+                    if res_v.ndim == 4:
+                        res_v = res_v.unsqueeze(0)
+                    if res_a.ndim == 3:
+                        res_a = res_a.unsqueeze(0)
+                    
+                    # Inject the generated chunk back into the isolated shot array
+                    if chunk_start_sec == shot_start_sec:
+                        pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v
+                        
+                        # If Internal or Reference Audio, capture the generated audio and write it to the Master Track!
+                        if not has_audio_input:
+                            actual_a_len = min(res_a.shape[2], curr_a_lat - prev_a_lat)
+                            # CLAMP FIX: Prevent Out-Of-Bounds PyTorch Crash at the edge of the timeline!
+                            actual_a_len = min(actual_a_len, audio_samples.shape[2] - true_a_start)
+                            
+                            if actual_a_len > 0:
+                                pass_a_samples[:, :, prev_a_lat:prev_a_lat + actual_a_len] = res_a[:, :, :actual_a_len]
+                                audio_samples[:, :, true_a_start : true_a_start + actual_a_len] = res_a[:, :, :actual_a_len]
+                            
+                    else:
+                        gen_v_len = curr_v_lat - prev_v_lat
+                        
+                        # --- PURE HARD PASTE ---
+                        pass_v_samples[:, :, prev_v_lat:curr_v_lat] = res_v[:, :, -gen_v_len:]
+                        
+                        # If Internal or Reference Audio, lock the context overlap so it doesn't hallucinate over the past!
+                        if not has_audio_input:
+                            gen_a_len = curr_a_lat - prev_a_lat
+                            actual_gen_a = min(gen_a_len, res_a.shape[2])
+                            
+                            # CLAMP FIX: Safely anchor the right-bound of the audio slice so it never overflows!
+                            true_a_end = min(true_a_start + req_a_len, audio_samples.shape[2])
+                            actual_gen_a = min(actual_gen_a, true_a_end)
+                            
+                            if actual_gen_a > 0:
+                                pass_a_samples[:, :, prev_a_lat:prev_a_lat + actual_gen_a] = res_a[:, :, -actual_gen_a:]
+                                audio_samples[:, :, true_a_end - actual_gen_a : true_a_end] = res_a[:, :, -actual_gen_a:]
+                    
+                    chunk_idx += 1
+                        
+                # End of Autoregressive Loop for Shot S
+                isolated_v_shots.append(pass_v_samples)
+                isolated_a_shots.append(pass_a_samples)
             
-        # 5. Concatenate the pristine, 0-indexed isolated shots end-to-end to form the timeline
-        global_v_samples = torch.cat(isolated_v_shots, dim=2)
-        global_a_samples = torch.cat(isolated_a_shots, dim=2)
-        sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
+            # 5. Concatenate the pristine, 0-indexed isolated shots end-to-end to form the timeline
+            global_v_samples = torch.cat(isolated_v_shots, dim=2)
+            global_a_samples = torch.cat(isolated_a_shots, dim=2)
+            sampled_tensor = comfy.nested_tensor.NestedTensor((global_v_samples, global_a_samples)).to(device)
+        
+        else:
+            # PURE PASSTHROUGH only triggers if ALL generation and upscaling stages are explicitly disabled!
+            pure_image_passthrough = (latent_override is None) and (images is not None) and not (spatial_upscale or temporal_upscale)
+            
+            if pure_image_passthrough:
+                print("\n--- Primary Sampling Bypassed: Pure Image Passthrough Detected ---")
+                print("-> Routing input image(s) directly to pixel-level post-processing.")
+                sampled_tensor = None
+            elif (latent_override is None) and (images is not None):
+                print("\n--- Primary Sampling Bypassed: Encoding Image(s) for Downstream Upscalers ---")
+                # Safely format standard [Frames, Height, Width, Channels] into the 5D VAE structure
+                img_in = images.unsqueeze(0) if images.ndim == 4 else images
+                if img_in.shape[-1] > 3:
+                    img_in = img_in[..., :3]
+                    
+                # Encode the raw images directly into the latent space at their native resolution!
+                encoded_v = video_vae.encode(img_in).to(device)
+                
+                # Dynamically generate a mathematically matching audio tensor so the pipeline doesn't crash
+                v_frames_encoded = ((encoded_v.shape[2] - 1) * 8) + 1 if encoded_v.shape[2] > 0 else 0
+                req_a_latents = get_audio_latents_func(v_frames_encoded, int(current_fps))
+                
+                a_override_slice = torch.zeros((batch_size, z_channels, req_a_latents, audio_freq), device=device)
+                if audio_samples is not None:
+                    copy_len = min(req_a_latents, audio_samples.shape[2])
+                    a_override_slice[:, :, :copy_len] = audio_samples[:, :, :copy_len]
+                    
+                sampled_tensor = comfy.nested_tensor.NestedTensor((encoded_v, a_override_slice)).to(device)
+            else:
+                print("\n--- Primary Sampling Bypassed (Injecting Override/Base Tensors) ---")
+                sampled_tensor = comfy.nested_tensor.NestedTensor((video_samples, audio_samples)).to(device)
 
         # ==========================================
         # MID-GENERATION STAGE 1 PREVIEW (MP4 MUX)
         # ==========================================
-        if enable_preview and (spatial_upscale or temporal_upscale):
+        if enable_preview and (spatial_upscale or temporal_upscale) and not pure_image_passthrough:
             print("\n--- Generating Stage 1 Preview ---")
             import uuid
             uid = node_id if node_id is not None else str(uuid.uuid4())
@@ -1681,25 +2196,47 @@ Output only the prompt. Nothing before it, nothing after it."""
                                 
                         chunk_start = chunk_end
                 else:
-                    print(f"-> Executing Pure Isolated Array VAE Decode ({total_splits} chunks) for pristine preview cuts...")
-                    latents_per_split = v_samps_prev.shape[2] // total_splits
+                    print(f"-> Executing Pure Isolated Array VAE Decode ({total_splits} chunks - CPU Offloaded)...")
+                        
+                    # PREVIEW FIX: Use base latents (v_samps_prev) and base boundaries since upscaling hasn't happened yet!
+                    def get_preview_shot_boundary(s_idx):
+                        if s_idx == 0: return 0
+                        sec_val = s_idx * (length_in_seconds / num_prompts)
+                        v_lat, _ = get_latent_counts(sec_val)
+                        return v_lat
+                        
                     frames_per_split_out = (length_in_seconds * current_fps) / total_splits
-                    
                     decoded_shots = []
                     for s in range(total_splits):
-                        split_latent = v_samps_prev[:, :, s * latents_per_split : (s + 1) * latents_per_split]
-                        decoded_shot = video_vae.decode(split_latent)
+                        start_lat = get_preview_shot_boundary(s)
+                        end_lat = get_preview_shot_boundary(s + 1) if s < total_splits - 1 else v_samps_prev.shape[2]
+                            
+                        split_latent = v_samps_prev[:, :, start_lat : end_lat]
+                        decoded_shot = video_vae.decode(split_latent).cpu()
                         
                         target_shot_frames = int(round((s + 1) * frames_per_split_out)) - int(round(s * frames_per_split_out))
                         if s == 0 and out_ref_frame_count > 0:
                             target_shot_frames += out_ref_frame_count
-                            
-                        if decoded_shot.shape[1] > target_shot_frames:
-                            decoded_shot = decoded_shot[:, :target_shot_frames]
+                                
+                        if video_mode == "text-to-video":
+                            # USER FIX: T2V has no setup padding. Do NOT drop any frames!
+                            pass
+                        elif decoded_shot.shape[1] > target_shot_frames:
+                            # DIRECTOR MODE CUT: Enforce strict, absolute boundary slicing
+                            if s > 0 and not bypass_img_ref:
+                                # Shots 2+: Slice EXACTLY the setup frames off the front
+                                start_idx = out_ref_frame_count
+                                end_idx = min(start_idx + target_shot_frames, decoded_shot.shape[1])
+                                decoded_shot = decoded_shot[:, start_idx:end_idx]
+                                print(f"   -> Trimmed exactly {out_ref_frame_count} static setup frames from the FRONT of Shot {s+1}")
+                            else:
+                                # Shot 1: Keep the setup frames and trim any VAE block-padding from the tail
+                                decoded_shot = decoded_shot[:, :target_shot_frames]
+                                
                         elif decoded_shot.shape[1] < target_shot_frames:
                             pad_len = target_shot_frames - decoded_shot.shape[1]
                             decoded_shot = torch.cat([decoded_shot, decoded_shot[:, -1:].repeat(1, pad_len, 1, 1, 1)], dim=1)
-                            
+                                
                         decoded_shots.append(decoded_shot)
                     preview_video = torch.cat(decoded_shots, dim=1)
             else:
@@ -1709,7 +2246,7 @@ Output only the prompt. Nothing before it, nothing after it."""
             
             # --- ASYMMETRIC PREVIEW TRIM ---
             preview_video_trim = out_ref_frame_count
-            if video_mode == "reference":
+            if video_mode == "reference-to-video":
                 n_ref_images = max(1, ref_frame_count // duplicate_frames) if duplicate_frames > 0 else 1
                 preview_video_trim += (2 * n_ref_images)
                 
@@ -1856,7 +2393,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                                            upscaler_model, guider, sampler, sigmas,
                                            noise_obj, eta, bongmath, final_pixels, strengths,
                                            time_scale_factor, width_scale_factor, height_scale_factor, video_vae, current_fps, disable_pbar, seed_number, wrap_callback,
-                                           temporal_positive=None, temporal_negative=None, video_mode="text"):
+                                           temporal_positive=None, temporal_negative=None, video_mode="text-to-video"):
 
             v_batch, v_channels, v_frames, v_height, v_width = v_samps.shape
             temp_tile_len = 48
@@ -1866,11 +2403,24 @@ Output only the prompt. Nothing before it, nothing after it."""
             num_chunks = 0
             while sim_start < v_frames:
                 num_chunks += 1
-                if sim_start == 0:
-                    sim_start = min(sim_start + temp_tile_len, v_frames)
+                
+                # SIMULATION FIX: The UI counter must perfectly mimic the Shot-Aware boundaries of the execution loop!
+                shot_len_latents = v_frames / num_prompts 
+                current_shot = min(int(sim_start // shot_len_latents), num_prompts - 1)
+                shot_start = int(current_shot * shot_len_latents)
+                shot_end = int((current_shot + 1) * shot_len_latents) if current_shot < num_prompts - 1 else v_frames
+                
+                if sim_start == shot_start:
+                    sim_end = min(sim_start + temp_tile_len, shot_end)
+                    sim_overlap = sim_start
                 else:
-                    sim_overlap = max(1, sim_start - temp_overlap - 1)
-                    sim_start = min(sim_start + temp_tile_len - (sim_start - sim_overlap), v_frames)
+                    sim_overlap = max(shot_start + 1, sim_start - temp_overlap - 1)
+                    sim_end = min(sim_start + temp_tile_len - (sim_start - sim_overlap), shot_end)
+                    
+                if sim_end <= sim_start:
+                    sim_end = sim_start + 1
+                    
+                sim_start = sim_end
             
             global_v_samps_up = None
             chunk_start = 0
@@ -2000,6 +2550,10 @@ Output only the prompt. Nothing before it, nothing after it."""
                 else:
                     sampled_v_tile = v_tile_up
 
+                # BATCH DIMENSION FAILSAFE
+                if sampled_v_tile.ndim == 4:
+                    sampled_v_tile = sampled_v_tile.unsqueeze(0)
+
                 if chunk_start == 0:
                     global_v_samps_up[:, :, :sampled_v_tile.shape[2]] = sampled_v_tile
                 else:
@@ -2024,7 +2578,7 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # 6.5 UPSCALING PASS (SPATIAL)
         # ==========================================
-        if spatial_upscale:
+        if spatial_upscale and not pure_image_passthrough:
             if spatial_upscaler is None:
                 raise ValueError("Spatial upscaler model is required if spatial_upscale is True.")
             
@@ -2056,73 +2610,62 @@ Output only the prompt. Nothing before it, nothing after it."""
         # ==========================================
         # 7. THE POST-CLEANSE HARD OVERWRITE
         # ==========================================
-        unbound_samples = sampled_tensor.unbind()
-        final_video_samples = unbound_samples[0].to(device)
-        final_audio_samples = unbound_samples[1].clone().to(device)
+        final_latent = None
+        video_out_latent = None
+        audio_out_latent = None
 
-        if has_audio_ref or has_audio_input:
-            max_latents = final_audio_samples.shape[2]
-            master_max = master_latents.shape[2]
-            
-            if has_audio_ref:
-                lock_a = min(setup_total_latents, max_latents, master_max)
-                if lock_a > 0:
-                    final_audio_samples[:, :, :lock_a, :] = master_latents[:, :, :lock_a, :]
+        if not pure_image_passthrough:
+            unbound_samples = sampled_tensor.unbind()
+            final_video_samples = unbound_samples[0].to(device)
+            final_audio_samples = unbound_samples[1].clone().to(device)
 
-            if has_audio_input:
-                start_c = min(setup_total_latents, max_latents)
-                target_len = max_latents - start_c
-                available_master = master_max - start_c
-                copy_len = min(target_len, available_master)
+            if has_audio_ref or has_audio_input:
+                max_latents = final_audio_samples.shape[2]
+                master_max = master_latents.shape[2]
                 
-                if copy_len > 0:
-                    final_audio_samples[:, :, start_c : start_c + copy_len, :] = \
-                        master_latents[:, :, start_c : start_c + copy_len, :]
-        else:
-            print("\n-> Executing 'Encode & Reinject' Optimization for Internal Audio Sync...")
-            # 1. Decode the chunked UNet latents into a continuous, perfectly-timed waveform
-            continuous_wf = audio_vae.decode(final_audio_samples)
-            
-            # 2. Re-encode the waveform into a single, mathematically pure latent array
-            try:
-                re_encoded_latents = audio_vae.encode(continuous_wf).to(device)
-            except AttributeError:
-                re_encoded_latents = audio_vae.first_stage_model.encode(continuous_wf).to(device)
-                
-            # 3. Overwrite the broken chunked latents with the pristine array to flatten the seams!
-            min_len = min(final_audio_samples.shape[2], re_encoded_latents.shape[2])
-            final_audio_samples_new = torch.zeros_like(final_audio_samples)
-            final_audio_samples_new[:, :, :min_len] = re_encoded_latents[:, :, :min_len]
-            final_audio_samples = final_audio_samples_new
+                if has_audio_ref:
+                    lock_a = min(setup_total_latents, max_latents, master_max)
+                    if lock_a > 0:
+                        final_audio_samples[:, :, :lock_a, :] = master_latents[:, :, :lock_a, :]
 
-        v_batch, _, v_frames, v_height, v_width = final_video_samples.shape
-        
-        final_v_mask = torch.ones((v_batch, v_frames, v_height, v_width), dtype=torch.float32, device=device)
-        final_a_mask = torch.ones_like(final_audio_samples)
-        
-        final_latent = {
-            "samples": comfy.nested_tensor.NestedTensor((final_video_samples, final_audio_samples)),
-            "noise_mask": comfy.nested_tensor.NestedTensor((final_v_mask.unsqueeze(1), final_a_mask)),
-            "sample_rate": sampling_rate,
-            "type": "audio"
-        }
-        
-        video_out_latent = {
-            "samples": final_video_samples,
-            "noise_mask": final_v_mask 
-        }
-        
-        audio_out_latent = {
-            "samples": final_audio_samples,
-            "noise_mask": final_a_mask,
-            "sample_rate": sampling_rate,
-            "type": "audio"
-        }
+                if has_audio_input:
+                    start_c = min(setup_total_latents, max_latents)
+                    target_len = max_latents - start_c
+                    available_master = master_max - start_c
+                    copy_len = min(target_len, available_master)
+                    
+                    if copy_len > 0:
+                        final_audio_samples[:, :, start_c : start_c + copy_len, :] = \
+                            master_latents[:, :, start_c : start_c + copy_len, :]
+
+            v_batch, _, v_frames, v_height, v_width = final_video_samples.shape
+            
+            final_v_mask = torch.ones((v_batch, v_frames, v_height, v_width), dtype=torch.float32, device=device)
+            final_a_mask = torch.ones_like(final_audio_samples)
+            
+            final_latent = {
+                "samples": comfy.nested_tensor.NestedTensor((final_video_samples, final_audio_samples)),
+                "noise_mask": comfy.nested_tensor.NestedTensor((final_v_mask.unsqueeze(1), final_a_mask)),
+                "sample_rate": sampling_rate,
+                "type": "audio"
+            }
+            
+            video_out_latent = {
+                "samples": final_video_samples,
+                "noise_mask": final_v_mask 
+            }
+            
+            audio_out_latent = {
+                "samples": final_audio_samples,
+                "noise_mask": final_a_mask,
+                "sample_rate": sampling_rate,
+                "type": "audio"
+            }
 
         # ==========================================
         # 7.5 ISOLATED TEMPORAL UPSCALE PASS (NATIVE NODES + SLIDING WINDOW)
         # ==========================================
-        if temporal_upscale:
+        if temporal_upscale and not pure_image_passthrough:
             if temporal_upscaler is None:
                 raise ValueError("Temporal upscaler model is required if temporal_upscale is True.")
                 
@@ -2139,11 +2682,14 @@ Output only the prompt. Nothing before it, nothing after it."""
                 func_name = getattr(cls, "FUNCTION", "execute")
                 return getattr(cls(), func_name)(**kwargs)
 
+            # Store the original reference frame count before the optimization wipes it!
+            original_ref_frame_count = out_ref_frame_count
+
             # =========================================================
             # 0. THE "LOB IT OFF" OPTIMIZATION (REFERENCE MODE ONLY)
             # =========================================================
             temp_video_mode = video_mode
-            if video_mode == "reference":
+            if video_mode in ["reference", "reference-to-video"]:
                 print("-> LOBBING OFF static setup latents to optimize Temporal Upscale...")
                 
                 # EXACT MATH: Calculate exact latents injected during setup
@@ -2160,7 +2706,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                     final_audio_samples = final_audio_samples[:, :, a_setup_base:]
                     
                 # Trick the rest of the temporal pass into acting exactly like Text-to-Video!
-                temp_video_mode = "text"
+                temp_video_mode = "text-to-video"
                 
                 # Tell the final audio/video muxer there are no setup frames left to drop!
                 out_ref_frame_count = 0
@@ -2205,9 +2751,9 @@ Output only the prompt. Nothing before it, nothing after it."""
                 # --- TEMPORAL SYNC FIX ---
                 # The "Lob It Off" math drops 16 frames of setup, leaving 1 static frame behind.
                 # We MUST pad the stretched audio with 1 frame of silence so the song starts perfectly on frame 1!
-                if video_mode == "reference":
-                    v_setup_base = ((out_ref_frame_count - 1) // 8) if out_ref_frame_count > 0 else 0
-                    remaining_silence_frames = out_ref_frame_count - (v_setup_base * 8)
+                if video_mode in ["reference", "reference-to-video"]:
+                    v_setup_base = ((original_ref_frame_count - 1) // 8) if original_ref_frame_count > 0 else 0
+                    remaining_silence_frames = original_ref_frame_count - (v_setup_base * 8)
                     if remaining_silence_frames > 0:
                         # Multiply by 2 because we are in the 48fps upscaled temporal timeline!
                         upscaled_silence_frames = remaining_silence_frames * 2
@@ -2254,7 +2800,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                     return 0
                 sec_val = s_idx * shot_dur
                 v_lat, _ = get_latent_counts(sec_val)
-                if video_mode == "reference":
+                if video_mode in ["reference", "reference-to-video"]:
                     # We lobbed off v_setup_base, so we must subtract it from subsequent shot indices!
                     return max(0, (v_lat - 1) - v_setup_base)
                 return max(0, v_lat - 1)
@@ -2265,11 +2811,11 @@ Output only the prompt. Nothing before it, nothing after it."""
                 frames_to_encode = None
                 
                 # Because temp_video_mode is strictly 'text' or 'image' now, the logic is ultra-clean!
-                if temp_video_mode == "text":
+                if temp_video_mode in ["text", "text-to-video"]:
                     base_latent = final_video_samples[:, :, v_idx:v_idx+1]
                     if base_latent.shape[2] > 0:
                         frames_to_encode = video_vae.decode(base_latent)
-                elif temp_video_mode == "image":
+                elif temp_video_mode in ["image", "image-to-video"]:
                     if first_frame is not None:
                         img_idx = min(s, first_frame.shape[0] - 1)
                         frames_to_encode = first_frame[img_idx:img_idx+1]
@@ -2374,6 +2920,9 @@ Output only the prompt. Nothing before it, nothing after it."""
                     # 3. Swap the random video noise for our locked global slice!
                     length = v_noise.shape[2]
                     v_noise_sliced = self.global_noise[:, :, self.start_idx : self.start_idx + length].clone().to(v_noise.device)
+                    if v_noise_sliced.shape[2] < length:
+                        pad_len = length - v_noise_sliced.shape[2]
+                        v_noise_sliced = torch.nn.functional.pad(v_noise_sliced, (0, 0, 0, 0, 0, pad_len))
                     
                     # 4. Repackage the NestedTensor so the UNet doesn't crash!
                     return comfy.nested_tensor.NestedTensor((v_noise_sliced, a_noise))
@@ -2405,18 +2954,28 @@ Output only the prompt. Nothing before it, nothing after it."""
                 
                 pixel_start = up_overlap_start * v_time_scale
                 pixel_out_frames = 1 + (tile_out_frames - 1) * v_time_scale
+                pixel_end = pixel_start + pixel_out_frames - 1
+                
+                # Helper to grab absolute latents securely from frame indices
+                def get_abs_a_lat(f_idx, fps):
+                    return get_audio_latents_func(int(f_idx + 1), int(fps)) if f_idx > 0 else 0
                 
                 if is_source_audio:
                     # SOURCE PATH: Use stretched latents and original fps to preserve external song timing
-                    a_start = get_audio_latents_func(pixel_start, int(current_fps))
-                    req_a_len = get_audio_latents_func(pixel_out_frames, int(current_fps))
+                    target_fps = int(current_fps)
+                    a_start = get_abs_a_lat(pixel_start, target_fps)
+                    a_end_ideal = get_abs_a_lat(pixel_end, target_fps)
+                    req_a_len = a_end_ideal - a_start
+                    
                     a_end = min(a_start + req_a_len, stretched_audio_latents.shape[2])
                     a_tile = stretched_audio_latents[:, :, a_start:a_end]
                 else:
                     # INTERNAL PATH: Use original latents and target fps to perfectly lock generated lips
                     target_fps = int(current_fps * 2)
-                    a_start = get_audio_latents_func(pixel_start, target_fps)
-                    req_a_len = get_audio_latents_func(pixel_out_frames, target_fps)
+                    a_start = get_abs_a_lat(pixel_start, target_fps)
+                    a_end_ideal = get_abs_a_lat(pixel_end, target_fps)
+                    req_a_len = a_end_ideal - a_start
+                    
                     a_end = min(a_start + req_a_len, base_audio_latents.shape[2])
                     a_tile = base_audio_latents[:, :, a_start:a_end]
 
@@ -2450,7 +3009,6 @@ Output only the prompt. Nothing before it, nothing after it."""
                 v_noise_mask = torch.ones((v_batch, 1, v_upsampled.shape[2], 1, 1), dtype=torch.float32, device=device)
                 
                 if chunk_start > 0:
-                    # REVERT THE +1 TRAP: The mathematical gap must remain so the UNet generates a bridge!
                     overlap_in_frames = chunk_start - overlap_start
                     overlap_out_frames = overlap_in_frames * 2 - 1
                     global_start = overlap_start * 2
@@ -2488,12 +3046,19 @@ Output only the prompt. Nothing before it, nothing after it."""
                 })
                 
                 print(f"-> Temporal Upscale Chunk {chunk_idx}/{num_chunks}...")
-                chunk_seed = seed_number + chunk_idx
 
                 # 1. Setup the CFG Guider
                 temporal_guider = comfy.samplers.CFGGuider(temporal_model)
                 temporal_guider.set_cfg(1.0)
-                temporal_guider.set_conds(crop_pos, crop_neg)
+                
+                center_latent = overlap_start + ((chunk_end - overlap_start) / 2.0)
+                shot_len_latents = v_frames_base / num_prompts
+                shot_idx = int(center_latent // shot_len_latents)
+                shot_idx = min(max(shot_idx, 0), num_prompts - 1)
+                
+                chunk_pos = [crop_pos[shot_idx]]
+                chunk_neg = [crop_neg[shot_idx]] if len(crop_neg) > shot_idx else crop_neg
+                temporal_guider.set_conds(chunk_pos, chunk_neg)
 
                 # 2. Setup the Sampler & Scheduler
                 temporal_sampler = comfy.samplers.sampler_object("euler_cfg_pp")
@@ -2509,11 +3074,10 @@ Output only the prompt. Nothing before it, nothing after it."""
                 chunk_seed_number = seed_number + chunk_idx
 
                 # 4. Extract Globally Anchored Noise!
-                # We pass the chunk_seed_number so the audio gets fresh noise, while video stays locked!
                 chunk_noise_obj = SlicedNoise(global_noise_tensor, up_overlap_start, chunk_seed_number)
                 noise = chunk_noise_obj.generate_noise(concat_latent)
 
-                # 5. Execute the Denoise Pass
+                # 5. Execute the Denoise Pass using the TEMPORAL Guider (Not Primary!)
                 sampled_latent_raw = temporal_guider.sample(
                     noise, 
                     concat_latent["samples"], 
@@ -2522,13 +3086,16 @@ Output only the prompt. Nothing before it, nothing after it."""
                     denoise_mask=concat_latent["noise_mask"], 
                     callback=None, 
                     disable_pbar=disable_pbar, 
-                    # Lock the global seed so the sampler stays deterministic!
                     seed=seed_number
                 )
                 sampled_latent = {"samples": sampled_latent_raw}
 
                 unbound_latents = sampled_latent["samples"].unbind()
                 sampled_v_tile = unbound_latents[0].to(device)
+
+                # BATCH DIMENSION FAILSAFE
+                if sampled_v_tile.ndim == 4:
+                    sampled_v_tile = sampled_v_tile.unsqueeze(0)
 
                 if chunk_start == 0:
                     global_v_temporal[:, :, :sampled_v_tile.shape[2]] = sampled_v_tile
@@ -2550,7 +3117,10 @@ Output only the prompt. Nothing before it, nothing after it."""
 
             final_video_samples = global_v_temporal
             current_fps *= 2
-            out_ref_frame_count = (out_ref_frame_count * 2) - 1
+            
+            # THE CRITICAL SYNC FIX: If lob-it-off ran, setup frames are gone. But we disabled it above, 
+            # so we just need to ensure the variable tracks correctly!
+            out_ref_frame_count = 0
 
             for p in final_positive:
                 p[1]["frame_rate"] = float(current_fps)
@@ -2637,307 +3207,393 @@ Output only the prompt. Nothing before it, nothing after it."""
                     print(f"\nWARNING: Face restoration initialization failed: {e}")
                     restore_faces = False
 
-            total_splits = 1
-            if autoregressive_chunking and chunk_size_seconds < length_in_seconds:
-                total_splits = int(round(length_in_seconds / chunk_size_seconds))
-            if num_prompts > 1:
-                total_splits = num_prompts
+            if pure_image_passthrough:
+                print("-> PURE PASSTHROUGH: Bypassing VAE, Face Restore, and Audio Slicing entirely.")
+                out_image = images.cpu()
+                out_audio = audio
+                out_ref_frame_count = 0
+            else:
+                # ---------------------------------------------------------
+                # STANDARD DECODE PATH: VAE, Face Restore, Sync & Slice
+                # ---------------------------------------------------------
+                total_splits = 1
+                if autoregressive_chunking and chunk_size_seconds < length_in_seconds:
+                    total_splits = int(round(length_in_seconds / chunk_size_seconds))
+                if num_prompts > 1:
+                    total_splits = num_prompts
 
-            if total_splits > 1:
-                if num_prompts == 1:
-                    print(f"-> Executing Seamless Sliding Window VAE Decode ({total_splits} chunks - CPU Offloaded)...")
-                    v_batch, v_channels, v_latents, v_h, v_w = final_video_samples.shape
-                    
-                    temp_tile_len = v_latents // total_splits
-                    temp_overlap = 4  # 32 frames of temporal VAE convolution overlap
-                    
-                    out_h = v_h * 32
-                    out_w = v_w * 32
-                    total_frames = (v_latents - 1) * 8 + 1
-                    
-                    decoded_video = torch.zeros((v_batch, total_frames, out_h, out_w, 3), dtype=torch.float32)
-                    
-                    chunk_start = 0
-                    valid_end_frame = 0
-                    
-                    while chunk_start < v_latents:
-                        if chunk_start == 0:
-                            chunk_end = min(chunk_start + temp_tile_len, v_latents)
-                            overlap_start = chunk_start
-                        else:
-                            overlap_start = max(1, chunk_start - temp_overlap - 1)
-                            chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), v_latents)
-                            
-                        if chunk_end <= chunk_start:
-                            chunk_end = chunk_start + 1
-                            
-                        v_tile = final_video_samples[:, :, overlap_start:chunk_end]
-                        v_tile_decoded = video_vae.decode(v_tile).cpu()
-                        current_valid_frames = v_tile_decoded.shape[1]
+                if total_splits > 1:
+                    if num_prompts == 1:
+                        print(f"-> Executing Seamless Sliding Window VAE Decode ({total_splits} chunks - CPU Offloaded)...")
+                        v_batch, v_channels, v_latents, v_h, v_w = final_video_samples.shape
+                        temp_tile_len = v_latents // total_splits
+                        temp_overlap = 4  
                         
-                        if chunk_start == 0:
-                            decoded_video[:, :current_valid_frames] = v_tile_decoded
-                            valid_end_frame = current_valid_frames
-                        else:
-                            global_start_frame = overlap_start * 8
-                            overlap_frames = valid_end_frame - global_start_frame
-                            
-                            if overlap_frames > 0:
-                                feather = torch.linspace(0.0, 1.0, overlap_frames).view(1, -1, 1, 1, 1)
-                                prev_overlap = decoded_video[:, global_start_frame : valid_end_frame]
-                                new_overlap = v_tile_decoded[:, :overlap_frames]
-                                
-                                blended = prev_overlap * (1.0 - feather) + new_overlap * feather
-                                decoded_video[:, global_start_frame : valid_end_frame] = blended
-                                
-                                if current_valid_frames > overlap_frames:
-                                    decoded_video[:, valid_end_frame : global_start_frame + current_valid_frames] = v_tile_decoded[:, overlap_frames:]
-                                    valid_end_frame = global_start_frame + current_valid_frames
+                        out_h = v_h * 32
+                        out_w = v_w * 32
+                        total_frames = (v_latents - 1) * 8 + 1
+                        decoded_video = torch.zeros((v_batch, total_frames, out_h, out_w, 3), dtype=torch.float32)
+                        
+                        chunk_start = 0
+                        valid_end_frame = 0
+                        while chunk_start < v_latents:
+                            if chunk_start == 0:
+                                chunk_end = min(chunk_start + temp_tile_len, v_latents)
+                                overlap_start = chunk_start
                             else:
-                                decoded_video[:, valid_end_frame : valid_end_frame + current_valid_frames] = v_tile_decoded
-                                valid_end_frame += current_valid_frames
+                                overlap_start = max(1, chunk_start - temp_overlap - 1)
+                                chunk_end = min(chunk_start + temp_tile_len - (chunk_start - overlap_start), v_latents)
                                 
-                        chunk_start = chunk_end
+                            if chunk_end <= chunk_start: chunk_end = chunk_start + 1
+                                
+                            v_tile = final_video_samples[:, :, overlap_start:chunk_end]
+                            v_tile_decoded = video_vae.decode(v_tile).cpu()
+                            current_valid_frames = v_tile_decoded.shape[1]
+                            
+                            if chunk_start == 0:
+                                decoded_video[:, :current_valid_frames] = v_tile_decoded
+                                valid_end_frame = current_valid_frames
+                            else:
+                                global_start_frame = overlap_start * 8
+                                overlap_frames = valid_end_frame - global_start_frame
+                                
+                                if overlap_frames > 0:
+                                    feather = torch.linspace(0.0, 1.0, overlap_frames).view(1, -1, 1, 1, 1)
+                                    prev_overlap = decoded_video[:, global_start_frame : valid_end_frame]
+                                    new_overlap = v_tile_decoded[:, :overlap_frames]
+                                    blended = prev_overlap * (1.0 - feather) + new_overlap * feather
+                                    decoded_video[:, global_start_frame : valid_end_frame] = blended
+                                    
+                                    if current_valid_frames > overlap_frames:
+                                        decoded_video[:, valid_end_frame : global_start_frame + current_valid_frames] = v_tile_decoded[:, overlap_frames:]
+                                        valid_end_frame = global_start_frame + current_valid_frames
+                                else:
+                                    decoded_video[:, valid_end_frame : valid_end_frame + current_valid_frames] = v_tile_decoded
+                                    valid_end_frame += current_valid_frames
+                                    
+                            chunk_start = chunk_end
+                    else:
+                        print(f"-> Executing Pure Isolated Array VAE Decode ({total_splits} chunks - CPU Offloaded)...")
+                        latents_per_split = final_video_samples.shape[2] // total_splits
+                        frames_per_split_out = (length_in_seconds * current_fps) / total_splits
+                        decoded_shots = []
+                        for s in range(total_splits):
+                            split_latent = final_video_samples[:, :, s * latents_per_split : (s + 1) * latents_per_split]
+                            decoded_shot = video_vae.decode(split_latent).cpu()
+                            
+                            target_shot_frames = int(round((s + 1) * frames_per_split_out)) - int(round(s * frames_per_split_out))
+                            if s == 0 and out_ref_frame_count > 0:
+                                target_shot_frames += out_ref_frame_count
+                                
+                            if decoded_shot.shape[1] > target_shot_frames:
+                                # DIRECTOR MODE CUT: Enforce strict, absolute boundary slicing
+                                if s > 0 and not bypass_img_ref:
+                                    # Shots 2+: Slice EXACTLY the setup frames off the front
+                                    start_idx = out_ref_frame_count
+                                    end_idx = min(start_idx + target_shot_frames, decoded_shot.shape[1])
+                                    decoded_shot = decoded_shot[:, start_idx:end_idx]
+                                    print(f"   -> Trimmed exactly {out_ref_frame_count} static setup frames from the FRONT of Shot {s+1}")
+                                else:
+                                    # Shot 1: Keep the setup frames and trim any VAE block-padding from the tail
+                                    decoded_shot = decoded_shot[:, :target_shot_frames]
+                                    
+                            elif decoded_shot.shape[1] < target_shot_frames:
+                                pad_len = target_shot_frames - decoded_shot.shape[1]
+                                decoded_shot = torch.cat([decoded_shot, decoded_shot[:, -1:].repeat(1, pad_len, 1, 1, 1)], dim=1)
+                                
+                            decoded_shots.append(decoded_shot)
+                        decoded_video = torch.cat(decoded_shots, dim=1)
                 else:
-                    print(f"-> Executing Pure Isolated Array VAE Decode ({total_splits} chunks - CPU Offloaded)...")
-                    latents_per_split = final_video_samples.shape[2] // total_splits
-                    frames_per_split_out = (length_in_seconds * current_fps) / total_splits
+                    decoded_video = video_vae.decode(final_video_samples).cpu()
                     
-                    decoded_shots = []
-                    for s in range(total_splits):
-                        split_latent = final_video_samples[:, :, s * latents_per_split : (s + 1) * latents_per_split]
-                        # INSTANT CPU OFFLOAD
-                        decoded_shot = video_vae.decode(split_latent).cpu()
+                decoded_video = decoded_video.view(v_batch * decoded_video.shape[1], decoded_video.shape[2], decoded_video.shape[3], 3)
+
+                if restore_faces and face_helper is not None and loaded_facerestore_model is not None:
+                    print(f"-> Restoring faces in video (Optimized In-Place Memory Processing)...")
+                    for f in range(decoded_video.shape[0]):
+                        frame_tensor = decoded_video[f]
+                        frame_np = (frame_tensor.numpy() * 255.0).astype(np.uint8)
+                        frame_bgr = frame_np[:, :, ::-1]
                         
+                        face_helper.clean_all()
+                        face_helper.read_image(frame_bgr)
+                        face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+                        face_helper.align_warp_face()
+                        
+                        for idx, cropped_face in enumerate(face_helper.cropped_faces):
+                            cropped_face_t = cropped_face.astype(np.float32) / 255.0
+                            cropped_face_t = cv2.cvtColor(cropped_face_t, cv2.COLOR_BGR2RGB)
+                            cropped_face_t = torch.from_numpy(cropped_face_t.transpose(2, 0, 1)).float()
+                            from torchvision.transforms.functional import normalize
+                            normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
+                            cropped_face_t = cropped_face_t.unsqueeze(0).to(fr_device)
+                            
+                            try:
+                                with torch.no_grad():
+                                    output = loaded_facerestore_model(cropped_face_t, w=codeformer_fidelity)[0]
+                                    output = output.squeeze(0).float().cpu().clamp_(-1, 1)
+                                    output = (output + 1) / 2.0
+                                    output_np = output.numpy().transpose(1, 2, 0)
+                                    output_bgr = cv2.cvtColor(output_np, cv2.COLOR_RGB2BGR)
+                                    restored_face_raw = (output_bgr * 255.0).round().astype(np.uint8)
+                                    final_restored_face = restored_face_raw
+                                    
+                                    if face_restore_color_match:
+                                        orig_lab = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2LAB).astype(np.float32)
+                                        rest_lab = cv2.cvtColor(final_restored_face, cv2.COLOR_BGR2LAB).astype(np.float32)
+                                        for c in range(3):
+                                            orig_mean, orig_std = orig_lab[:,:,c].mean(), orig_lab[:,:,c].std()
+                                            rest_mean, rest_std = rest_lab[:,:,c].mean(), rest_lab[:,:,c].std()
+                                            rest_lab[:,:,c] = (rest_lab[:,:,c] - rest_mean) * (orig_std / (rest_std + 1e-6)) + orig_mean
+                                        rest_lab = np.clip(rest_lab, 0, 255).astype(np.uint8)
+                                        final_restored_face = cv2.cvtColor(rest_lab, cv2.COLOR_LAB2BGR)
+                                        
+                                    if face_restore_edge_blur:
+                                        h, w = final_restored_face.shape[:2]
+                                        mask = np.zeros((h, w, 3), dtype=np.float32)
+                                        pad = int(h * 0.12)
+                                        mask[pad:h-pad, pad:w-pad] = 1.0
+                                        mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=pad*0.5, sigmaY=pad*0.5)
+                                        final_restored_face = (final_restored_face * mask + cropped_face.astype(np.float32) * (1.0 - mask)).astype(np.uint8)
+                                face_helper.add_restored_face(final_restored_face)
+                            except Exception as error:
+                                face_helper.add_restored_face(cropped_face)
+                                
+                        face_helper.get_inverse_affine(None)
+                        pasted_img_bgr = face_helper.paste_faces_to_input_image()
+                        
+                        if face_restore_blend < 1.0:
+                            final_img_bgr = cv2.addWeighted(frame_bgr, 1.0 - face_restore_blend, pasted_img_bgr, face_restore_blend, 0)
+                        else:
+                            final_img_bgr = pasted_img_bgr
+                            
+                        restored_img_rgb = final_img_bgr[:, :, ::-1]
+                        decoded_video[f] = torch.from_numpy(restored_img_rgb.astype(np.float32) / 255.0)
+                        if f > 0 and f % 16 == 0:
+                            comfy.model_management.soft_empty_cache()
+                
+                # --- EXACT AUDIO DECODE & ALIGNMENT ---
+                a_latent_samples = final_audio_samples
+                if a_latent_samples.is_nested:
+                    a_latent_samples = a_latent_samples.unbind()[-1]
+                
+                sample_rate = int(getattr(audio_vae, "output_sample_rate", audio_vae.first_stage_model.output_sample_rate))
+                num_frames = decoded_video.shape[0]
+                
+                # RESTORED MISSING VARIABLES: These dictate exactly how many setup frames to drop!
+                audio_trim_frames = out_ref_frame_count if video_mode != "text-to-video" else 0
+                video_trim = out_ref_frame_count if video_mode != "text-to-video" else 0
+                
+                if video_mode == "reference-to-video":
+                    n_ref_images = max(1, ref_frame_count // duplicate_frames) if duplicate_frames > 0 else 1
+                    additional_video_trim = 2 * n_ref_images
+                    video_trim += additional_video_trim
+                    
+                time_to_drop = audio_trim_frames / current_fps
+                samples_to_drop = int(time_to_drop * sample_rate)
+                base_fps = current_fps / 2.0 if temporal_upscale else current_fps
+
+                print("--- Decoding Master Audio Track ---")
+                
+                if has_audio_input and not temporal_upscale:
+                    print("-> Bypassing VAE Decode: Using pristine source waveform directly to prevent truncation...")
+                    waveform = torchaudio.functional.resample(master_wf.clone(), sampling_rate, sample_rate).to(device)
+                    # For src audio, the length is already perfectly matched to the timeline
+                else:
+                    print("-> Executing Safe Chunked Audio Decode...")
+                    # Restore the chunked decode to prevent VAE sequence limits for generated audio!
+                    get_audio_latents_func = getattr(audio_vae, "num_of_latents_from_frames", getattr(audio_vae.first_stage_model, "num_of_latents_from_frames", None))
+                    max_audio_lats = get_audio_latents_func(int(20.0 * current_fps), int(current_fps))
+                    
+                    if a_latent_samples.shape[2] > max_audio_lats:
+                        wf_chunks = []
+                        for i in range(0, a_latent_samples.shape[2], max_audio_lats):
+                            chunk = a_latent_samples[:, :, i:i+max_audio_lats]
+                            wf_chunks.append(audio_vae.decode(chunk).to(a_latent_samples.device).movedim(-1, 1))
+                        waveform = torch.cat(wf_chunks, dim=-1)
+                    else:
+                        waveform = audio_vae.decode(a_latent_samples).to(a_latent_samples.device).movedim(-1, 1)
+
+                    # Only apply the VAE warmup trim if we actually decoded through the VAE!
+                    exact_target_samples = int((length_in_seconds + time_to_drop) * sample_rate)
+                    if waveform.shape[-1] > exact_target_samples:
+                        extra_samps = waveform.shape[-1] - exact_target_samples
+                        waveform = waveform[..., extra_samps:]
+                    elif waveform.shape[-1] < exact_target_samples:
+                        pad_len = exact_target_samples - waveform.shape[-1]
+                        waveform = torch.nn.functional.pad(waveform, (0, pad_len))
+                        
+                # Paste the pristine Voice Clone over the VAE setup audio so the original voice is perfectly clear
+                if has_audio_ref and not temporal_upscale:
+                    pristine_wf = torchaudio.functional.resample(master_wf.clone(), sampling_rate, sample_rate).to(waveform.device)
+                    if pristine_wf.shape[1] < waveform.shape[1]:
+                        pristine_wf = pristine_wf.repeat(1, waveform.shape[1], 1)
+                    elif pristine_wf.shape[1] > waveform.shape[1]:
+                        waveform = waveform.repeat(1, pristine_wf.shape[1], 1)
+                        
+                    region_a_samps_out = int((region_a_frames / base_fps) * sample_rate)
+                    limit = min(region_a_samps_out, pristine_wf.shape[-1], waveform.shape[-1])
+                    if limit > 0: waveform[..., :limit] = pristine_wf[..., :limit]
+
+                # --- APPLY RAZOR BLADE TO INTERNAL AUDIO ---
+                if not has_audio_input and num_prompts > 1:
+                    print("-> Executing Isolated Shot Audio Decode for perfect multi-shot sync...")
+                    frames_per_split_out = (length_in_seconds * current_fps) / total_splits
+                    trimmed_audio_chunks = []
+                    
+                    shot_duration = length_in_seconds / num_prompts
+                    total_a_latents = a_latent_samples.shape[2]
+                    
+                    for s in range(total_splits):
+                        sec_start = s * shot_duration
+                        sec_end = (s + 1) * shot_duration
+                        
+                        _, a_start_lat = get_latent_counts(sec_start)
+                        _, a_end_lat = get_latent_counts(sec_end)
+                        if s == total_splits - 1:
+                            a_end_lat = total_a_latents
+                            
+                        # 1. Isolate the audio latents for this specific shot
+                        s_lat = a_latent_samples[:, :, a_start_lat:a_end_lat]
+                        
+                        # 2. Decode the isolated latents (prevents VAE convolution shrinkage)
+                        chunk_wf = audio_vae.decode(s_lat).to(a_latent_samples.device).movedim(-1, 1)
+                        
+                        # 3. Determine the exact target frames
                         target_shot_frames = int(round((s + 1) * frames_per_split_out)) - int(round(s * frames_per_split_out))
                         if s == 0 and out_ref_frame_count > 0:
                             target_shot_frames += out_ref_frame_count
                             
-                        if decoded_shot.shape[1] > target_shot_frames:
-                            decoded_shot = decoded_shot[:, :target_shot_frames]
-                        elif decoded_shot.shape[1] < target_shot_frames:
-                            pad_len = target_shot_frames - decoded_shot.shape[1]
-                            decoded_shot = torch.cat([decoded_shot, decoded_shot[:, -1:].repeat(1, pad_len, 1, 1, 1)], dim=1)
+                        # 4. Convert target video frames to exact audio samples
+                        target_samples = int(target_shot_frames * (sample_rate / base_fps))
+                        
+                        # 5. Trim the exact audio overhang
+                        if chunk_wf.shape[-1] > target_samples:
+                            extra_samples = chunk_wf.shape[-1] - target_samples
                             
-                        decoded_shots.append(decoded_shot)
-                    decoded_video = torch.cat(decoded_shots, dim=1)
-            else:
-                # INSTANT CPU OFFLOAD
-                decoded_video = video_vae.decode(final_video_samples).cpu()
-                
-            # Flatten batch dimension for output compatibility
-            decoded_video = decoded_video.view(v_batch * decoded_video.shape[1], decoded_video.shape[2], decoded_video.shape[3], 3)
-
-            if restore_faces and face_helper is not None and loaded_facerestore_model is not None:
-                print(f"-> Restoring faces in video (Optimized In-Place Memory Processing)...")
-                for f in range(decoded_video.shape[0]):
-                    frame_tensor = decoded_video[f]
-                    # Already on CPU, no extra VRAM jump required
-                    frame_np = (frame_tensor.numpy() * 255.0).astype(np.uint8)
-                    frame_bgr = frame_np[:, :, ::-1]
-                    
-                    face_helper.clean_all()
-                    face_helper.read_image(frame_bgr)
-                    face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
-                    face_helper.align_warp_face()
-                    
-                    for idx, cropped_face in enumerate(face_helper.cropped_faces):
-                        cropped_face_t = cropped_face.astype(np.float32) / 255.0
-                        cropped_face_t = cv2.cvtColor(cropped_face_t, cv2.COLOR_BGR2RGB)
-                        cropped_face_t = torch.from_numpy(cropped_face_t.transpose(2, 0, 1)).float()
-                        
-                        from torchvision.transforms.functional import normalize
-                        normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
-                        cropped_face_t = cropped_face_t.unsqueeze(0).to(fr_device)
-                        
-                        try:
-                            with torch.no_grad():
-                                output = loaded_facerestore_model(cropped_face_t, w=codeformer_fidelity)[0]
-                                output = output.squeeze(0).float().cpu().clamp_(-1, 1)
-                                output = (output + 1) / 2.0
-                                output_np = output.numpy().transpose(1, 2, 0)
-                                output_bgr = cv2.cvtColor(output_np, cv2.COLOR_RGB2BGR)
-                                restored_face_raw = (output_bgr * 255.0).round().astype(np.uint8)
+                            # DIRECTOR MODE CUT: Mirrors the video razor blade perfectly
+                            if s > 0 and not bypass_img_ref:
+                                # For shots 2+ in ref mode, trim from the FRONT
+                                chunk_wf = chunk_wf[..., extra_samples:]
+                            else:
+                                # For all txt mode, and shot 1 in ref mode, trim from the TAIL
+                                chunk_wf = chunk_wf[..., :target_samples]
                                 
-                                final_restored_face = restored_face_raw
-                                
-                                if face_restore_color_match:
-                                    orig_lab = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2LAB).astype(np.float32)
-                                    rest_lab = cv2.cvtColor(final_restored_face, cv2.COLOR_BGR2LAB).astype(np.float32)
-                                    
-                                    for c in range(3):
-                                        orig_mean, orig_std = orig_lab[:,:,c].mean(), orig_lab[:,:,c].std()
-                                        rest_mean, rest_std = rest_lab[:,:,c].mean(), rest_lab[:,:,c].std()
-                                        rest_lab[:,:,c] = (rest_lab[:,:,c] - rest_mean) * (orig_std / (rest_std + 1e-6)) + orig_mean
-                                        
-                                    rest_lab = np.clip(rest_lab, 0, 255).astype(np.uint8)
-                                    final_restored_face = cv2.cvtColor(rest_lab, cv2.COLOR_LAB2BGR)
-                                    
-                                if face_restore_edge_blur:
-                                    h, w = final_restored_face.shape[:2]
-                                    mask = np.zeros((h, w, 3), dtype=np.float32)
-                                    pad = int(h * 0.12)
-                                    mask[pad:h-pad, pad:w-pad] = 1.0
-                                    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=pad*0.5, sigmaY=pad*0.5)
-                                    
-                                    final_restored_face = (final_restored_face * mask + cropped_face.astype(np.float32) * (1.0 - mask)).astype(np.uint8)
-
-                            face_helper.add_restored_face(final_restored_face)
-                        except Exception as error:
-                            print(f'\tFailed inference for CodeFormer on frame {f}: {error}')
-                            face_helper.add_restored_face(cropped_face)
+                        elif chunk_wf.shape[-1] < target_samples:
+                            pad_len = target_samples - chunk_wf.shape[-1]
+                            chunk_wf = torch.nn.functional.pad(chunk_wf, (0, pad_len))
                             
-                    face_helper.get_inverse_affine(None)
-                    pasted_img_bgr = face_helper.paste_faces_to_input_image()
-                    
-                    if face_restore_blend < 1.0:
-                        final_img_bgr = cv2.addWeighted(frame_bgr, 1.0 - face_restore_blend, pasted_img_bgr, face_restore_blend, 0)
-                    else:
-                        final_img_bgr = pasted_img_bgr
+                        trimmed_audio_chunks.append(chunk_wf)
                         
-                    restored_img_rgb = final_img_bgr[:, :, ::-1]
+                    # Reconstruct the mathematically pure timeline
+                    waveform = torch.cat(trimmed_audio_chunks, dim=-1)
+
+                # --- 2. VIDEO SLICE ---
+                if video_trim >= num_frames:
+                    out_image = decoded_video[-1:].cpu()
+                elif video_trim > 0:
+                    out_image = decoded_video[video_trim:].cpu()
+                else:
+                    out_image = decoded_video.cpu()
+
+                exact_target_frames = int(length_in_seconds * current_fps)
+                if out_image.shape[0] > exact_target_frames:
+                    out_image = out_image[:exact_target_frames]
+                    print(f"-> Trimmed output video to exactly {exact_target_frames} frames.")
+
+            # ==========================================
+            # COLORFX POST-PROCESSING INJECTION
+            # ==========================================
+            if enable_colorfx and out_image is not None:
+                print("--- Applying ColorFX Mastering Pass ---")
+                processed_images_tensors = []
+                iterable = range(out_image.shape[0])
+                if TQDM_AVAILABLE: iterable = tqdm(iterable, desc="ColorFX Processing Frames")
                     
-                    # IN-PLACE RAM OVERWRITE: Destroys the old un-restored frame to prevent RAM doubling!
-                    decoded_video[f] = torch.from_numpy(restored_img_rgb.astype(np.float32) / 255.0)
+                for i in iterable:
+                    pil_image = tensor2pil(out_image[i]).convert("RGB")
+                    if enable_color_correction:
+                        pil_image = self._apply_shadows_highlights(pil_image, shadow_intensity, highlight_intensity, hdr_intensity)
+                        pil_image = self._apply_color_enhancements(pil_image, brightness, contrast, saturation, enhance_color)
+                    if enable_lut_processing and lut_name != "None":
+                        pil_image = self._apply_lut_effect(pil_image, lut_name, lut_strength, lut_log_process)
+                    if enable_enhancements:
+                        pil_image = self._apply_sharpness_detail(pil_image, sharpness, edge_enhance_strength, detail_enhance_strength)
+                    if enable_blur_effects:
+                        pil_image = self._apply_blurs(pil_image, blur_radius, gaussian_blur_radius)
+                        if radial_blur_strength > 0.0:
+                            pil_image = self._apply_radial_blur(pil_image, radial_blur_strength, radial_blur_center_x, radial_blur_center_y, radial_blur_focus_spread, radial_blur_steps)
+                    if enable_stylistic_effects:
+                        needs_pil = any(v!=0 for v in [chromatic_aberration_r_x, chromatic_aberration_r_y, chromatic_aberration_b_x, chromatic_aberration_b_y]) or chromatic_blur_amount > 0 or scanline_intensity > 0.0 or soft_light_opacity > 0.0
+                        if needs_pil:
+                            if any(v!=0 for v in [chromatic_aberration_r_x, chromatic_aberration_r_y, chromatic_aberration_b_x, chromatic_aberration_b_y]) or chromatic_blur_amount > 0:
+                                pil_image = self._apply_chromatic_aberration(pil_image, chromatic_aberration_r_x, chromatic_aberration_r_y, chromatic_aberration_b_x, chromatic_aberration_b_y, chromatic_blur_amount)
+                            if scanline_intensity > 0.0:
+                                pil_image = self._apply_scanlines(pil_image, scanline_intensity)
+                            if soft_light_opacity > 0.0:
+                                pil_image = self._apply_soft_light(pil_image, soft_light_opacity, soft_light_blur_radius)
+                    processed_images_tensors.append(pil2tensor(pil_image))
                     
-                    # PERIODIC VRAM FLUSH: Clears the CodeFormer GPU buffers every 16 frames
-                    if f > 0 and f % 16 == 0:
-                        comfy.model_management.soft_empty_cache()
-            
-            a_latent_samples = final_audio_samples
-            if a_latent_samples.is_nested:
-                a_latent_samples = a_latent_samples.unbind()[-1]
-            
-            sample_rate = int(getattr(audio_vae, "output_sample_rate", audio_vae.first_stage_model.output_sample_rate))
-            
-            # --- 1. EXACT SYNC MATH ---
-            num_frames = decoded_video.shape[0]
-            
-            # Base Setup Padding (Keeps audio perfectly mapped to VAE latents)
-            audio_trim_frames = out_ref_frame_count
-            video_trim = out_ref_frame_count
-            
-            # The User's Reference Mode Asymmetric Trim
-            if video_mode == "reference":
-                n_ref_images = max(1, ref_frame_count // duplicate_frames) if duplicate_frames > 0 else 1
-                additional_video_trim = 2 * n_ref_images
-                
-                video_trim += additional_video_trim
-                print(f"-> Reference Mode: Trimming {additional_video_trim} additional video frames to perfect visual sync (Audio front remains untouched).")
-                
-#            if temporal_upscale and video_mode == "reference":
-#                print("-> Applying 1-frame video shift to perfect Reference lip sync...")
-#                video_trim += 1
-                
-            # Audio drops strictly based on the original setup frames to preserve the song start
-            time_to_drop = audio_trim_frames / current_fps
-            samples_to_drop = int(time_to_drop * sample_rate)
-            base_fps = current_fps / 2.0 if temporal_upscale else current_fps
+                out_image = torch.cat(processed_images_tensors, dim=0).to(out_image.device)
+                if enable_color_correction and gamma != 1.0:
+                    out_image = self._apply_gamma_torch(out_image, gamma)
+                if enable_stylistic_effects:
+                    if simple_film_grain_intensity > 0.0:
+                        out_image = self._apply_simple_film_grain_torch(out_image, simple_film_grain_intensity, simple_film_grain_monochrome)
+                    if vignette_intensity > 0.0:
+                        out_image = self._apply_vignette_torch(out_image, vignette_intensity, vignette_center_x, vignette_center_y)
 
-            print("--- Decoding Master Audio Track ---")
-            # Decode the entire audio latent array in a single pass to prevent STFT padding multiplication!
-            print("-> Executing Seamless Single-Pass Audio Decode for perfect lip-sync...")
-            waveform = audio_vae.decode(a_latent_samples).to(a_latent_samples.device).movedim(-1, 1)
-
-            if (has_audio_ref or has_audio_input) and not temporal_upscale:
-                pristine_wf = torchaudio.functional.resample(master_wf.clone(), sampling_rate, sample_rate).to(waveform.device)
+            # ==========================================
+            # AUDIO MASTERING & MUXING (SKIPPED FOR PASSTHROUGH)
+            # ==========================================
+            if not pure_image_passthrough:
+                final_video_length_seconds = out_image.shape[0] / current_fps
+                exact_target_samples = int(final_video_length_seconds * sample_rate)
                 
-                if pristine_wf.shape[1] < waveform.shape[1]:
-                    pristine_wf = pristine_wf.repeat(1, waveform.shape[1], 1)
-                elif pristine_wf.shape[1] > waveform.shape[1]:
-                    waveform = waveform.repeat(1, pristine_wf.shape[1], 1)
+                if out_audio is not None and out_audio["waveform"].shape[-1] > exact_target_samples:
+                    out_audio["waveform"] = out_audio["waveform"][..., :exact_target_samples]
                     
-                region_a_samps_out = int((region_a_frames / base_fps) * sample_rate)
-                setup_total_samps_out = int(((region_a_frames + region_b_frames) / base_fps) * sample_rate)
+                print("-> Running Final Audio Mastering Pass (Soft Limiter & Normalization)...")
+                threshold = 0.90
+                abs_wf = torch.abs(waveform)
+                clip_mask = abs_wf > threshold
+                if clip_mask.any():
+                    waveform[clip_mask] = torch.sign(waveform[clip_mask]) * (threshold + 0.1 * torch.tanh((abs_wf[clip_mask] - threshold) / 0.1))
+                    
+                max_val = torch.max(torch.abs(waveform))
+                if max_val > 0.0:
+                    gain_boost = 0.95 / max_val
+                    gain_boost = torch.clamp(gain_boost, max=3.0)
+                    waveform = waveform * gain_boost
+                    
+                waveform = torch.clamp(waveform, -1.0, 1.0)
+                total_samples = waveform.shape[-1]
                 
-                if has_audio_ref:
-                    limit = min(region_a_samps_out, pristine_wf.shape[-1], waveform.shape[-1])
-                    if limit > 0:
-                        waveform[..., :limit] = pristine_wf[..., :limit]
-                
-                if has_audio_input:
-                    rem_pristine = pristine_wf.shape[-1] - setup_total_samps_out
-                    rem_wave = waveform.shape[-1] - setup_total_samps_out
-                    limit = min(rem_pristine, rem_wave)
-                    if limit > 0:
-                        waveform[..., setup_total_samps_out : setup_total_samps_out + limit] = \
-                            pristine_wf[..., setup_total_samps_out : setup_total_samps_out + limit]
-
-            # --- 2. VIDEO SLICE ---
-            if video_trim >= num_frames:
-                out_image = decoded_video[-1:].cpu()
-            elif video_trim > 0:
-                out_image = decoded_video[video_trim:].cpu()
-            else:
-                out_image = decoded_video.cpu()
-
-            exact_target_frames = int(length_in_seconds * current_fps)
-            if out_image.shape[0] > exact_target_frames:
-                out_image = out_image[:exact_target_frames]
-                print(f"-> Trimmed output video to exactly {exact_target_frames} frames.")
-                
-            # DYNAMIC AUDIO TAIL TRIM: Match the EXACT final length of the trimmed video!
-            final_video_length_seconds = out_image.shape[0] / current_fps
-            exact_target_samples = int(final_video_length_seconds * sample_rate)
-            
-            if out_audio is not None and out_audio["waveform"].shape[-1] > exact_target_samples:
-                out_audio["waveform"] = out_audio["waveform"][..., :exact_target_samples]
-                print(f"-> Trimmed output audio tail to exactly {exact_target_samples} samples to match final video length.")
-
-            # --- THE POST-DECODE MASTERING PASS (ANTI-CLIP & NORMALIZE) ---
-            print("-> Running Final Audio Mastering Pass (Soft Limiter & Normalization)...")
-            
-            # 1. Soft Limiter (Anti-Clipping)
-            threshold = 0.90
-            abs_wf = torch.abs(waveform)
-            clip_mask = abs_wf > threshold
-            if clip_mask.any():
-                waveform[clip_mask] = torch.sign(waveform[clip_mask]) * (threshold + 0.1 * torch.tanh((abs_wf[clip_mask] - threshold) / 0.1))
-                
-            # 2. Auto-Gain / Normalization (Fixes volume drops)
-            max_val = torch.max(torch.abs(waveform))
-            if max_val > 0.0:
-                gain_boost = 0.95 / max_val
-                # Tensor-safe clamp to prevent blowing out quiet ambient noise
-                gain_boost = torch.clamp(gain_boost, max=3.0)
-                waveform = waveform * gain_boost
-                
-            # 3. Absolute Safety Clamp
-            waveform = torch.clamp(waveform, -1.0, 1.0)
-
-            total_samples = waveform.shape[-1]
-            
-            if samples_to_drop >= total_samples:
-                empty_wf = torch.zeros((1, 2, 1), device=waveform.device, dtype=torch.float32)
-                out_audio = {"waveform": empty_wf.cpu(), "sample_rate": sample_rate}
-            elif samples_to_drop > 0:
-                sliced_wf = waveform[..., samples_to_drop:]
-                fade_samples = min(int(0.03 * sample_rate), sliced_wf.shape[-1])
-                if fade_samples > 0:
-                    fade_tensor = torch.linspace(0.0, 1.0, fade_samples, device=sliced_wf.device, dtype=sliced_wf.dtype)
-                    sliced_wf[..., :fade_samples] *= fade_tensor
-                
-                final_wf = sliced_wf
-                if final_wf.dim() == 2:
-                    final_wf = final_wf.unsqueeze(0)
-                if final_wf.shape[1] == 1:
-                    final_wf = final_wf.repeat(1, 2, 1)
-                elif final_wf.shape[1] > 2:
-                    final_wf = final_wf[:, :2, :]
-                
-                final_wf = final_wf.to(torch.float32).clamp(-1.0, 1.0).cpu() 
-                out_audio = {"waveform": final_wf, "sample_rate": sample_rate}
-            else:
-                final_wf = waveform
-                if final_wf.dim() == 2:
-                    final_wf = final_wf.unsqueeze(0)
-                if final_wf.shape[1] == 1:
-                    final_wf = final_wf.repeat(1, 2, 1)
-                elif final_wf.shape[1] > 2:
-                    final_wf = final_wf[:, :2, :]
-                
-                final_wf = final_wf.to(torch.float32).clamp(-1.0, 1.0).cpu()
-                out_audio = {"waveform": final_wf, "sample_rate": sample_rate}
+                if samples_to_drop >= total_samples:
+                    empty_wf = torch.zeros((1, 2, 1), device=waveform.device, dtype=torch.float32)
+                    out_audio = {"waveform": empty_wf.cpu(), "sample_rate": sample_rate}
+                elif samples_to_drop > 0:
+                    sliced_wf = waveform[..., samples_to_drop:]
+                    fade_samples = min(int(0.03 * sample_rate), sliced_wf.shape[-1])
+                    if fade_samples > 0:
+                        fade_tensor = torch.linspace(0.0, 1.0, fade_samples, device=sliced_wf.device, dtype=sliced_wf.dtype)
+                        sliced_wf[..., :fade_samples] *= fade_tensor
+                    
+                    final_wf = sliced_wf
+                    if final_wf.dim() == 2: final_wf = final_wf.unsqueeze(0)
+                    if final_wf.shape[1] == 1: final_wf = final_wf.repeat(1, 2, 1)
+                    elif final_wf.shape[1] > 2: final_wf = final_wf[:, :2, :]
+                    
+                    final_wf = final_wf.to(torch.float32).clamp(-1.0, 1.0).cpu() 
+                    out_audio = {"waveform": final_wf, "sample_rate": sample_rate}
+                else:
+                    final_wf = waveform
+                    if final_wf.dim() == 2: final_wf = final_wf.unsqueeze(0)
+                    if final_wf.shape[1] == 1: final_wf = final_wf.repeat(1, 2, 1)
+                    elif final_wf.shape[1] > 2: final_wf = final_wf[:, :2, :]
+                    
+                    final_wf = final_wf.to(torch.float32).clamp(-1.0, 1.0).cpu()
+                    out_audio = {"waveform": final_wf, "sample_rate": sample_rate}
 
             if InputImpl is not None and Types is not None and out_image is not None:
                 try:
@@ -2954,6 +3610,12 @@ Output only the prompt. Nothing before it, nothing after it."""
             if m is not None:
                 try:
                     m.unpatch_model()
+                    
+                    # NEW: Deep cleanse the 10S hooks to prevent VRAM memory leaks!
+                    for block in m.model.diffusion_model.transformer_blocks:
+                        if hasattr(block, "attn1") and hasattr(block.attn1, "_10s_trixope_anchor_handle"):
+                            block.attn1._10s_trixope_anchor_handle.remove()
+                            delattr(block.attn1, "_10s_trixope_anchor_handle")
                 except:
                     pass
                 
@@ -3031,7 +3693,7 @@ Output only the prompt. Nothing before it, nothing after it."""
         else:
             print("--- Deep Cache Clearance Bypassed ---")
 
-        return (final_prompt_string_out, final_latent, video_out_latent, audio_out_latent, out_video, out_image, out_audio, float(current_fps), out_ref_frame_count, node_id)
+        return (final_prompt_string_out, final_positive, final_negative, final_latent, video_out_latent, audio_out_latent, out_video, out_image, out_audio, float(current_fps), out_ref_frame_count, node_id)
 
 # ==========================================
 # QUEUE INTERCEPTOR ("CONTROL BEFORE GENERATE")
@@ -3041,7 +3703,7 @@ def trixope_on_prompt_handler(json_data):
         prompt = json_data.get("prompt", {})
         seed_map = {}
         for k, v in prompt.items():
-            if v.get("class_type") == "FilmAuteur_LTXV":
+            if v.get("class_type") == "FilmAuteur_LTX":
                 inputs = v.get("inputs", {})
                 
                 # Now the backend ACTUALLY receives your command!
