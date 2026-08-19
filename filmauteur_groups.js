@@ -148,17 +148,20 @@ app.registerExtension({
 
             const oldGetInputPos = nodeType.prototype.getInputPos;
             nodeType.prototype.getInputPos = function(slotNumber) {
-                return oldGetInputPos.call(this, this.properties.collapse_connections ? 0 : slotNumber);
+                const fn = oldGetInputPos || this.constructor.prototype.getInputPos || LiteGraph.LGraphNode.prototype.getInputPos;
+                return fn.call(this, this.properties.collapse_connections ? 0 : slotNumber);
             };
 
             const oldGetOutputPos = nodeType.prototype.getOutputPos;
             nodeType.prototype.getOutputPos = function(slotNumber) {
-                return oldGetOutputPos.call(this, this.properties.collapse_connections ? 0 : slotNumber);
+                const fn = oldGetOutputPos || this.constructor.prototype.getOutputPos || LiteGraph.LGraphNode.prototype.getOutputPos;
+                return fn.call(this, this.properties.collapse_connections ? 0 : slotNumber);
             };
 
             const oldGetConnectionPos = nodeType.prototype.getConnectionPos;
             nodeType.prototype.getConnectionPos = function(isInput, slotNumber, out) {
-                return oldGetConnectionPos.call(this, isInput, this.properties.collapse_connections ? 0 : slotNumber, out);
+                const fn = oldGetConnectionPos || this.constructor.prototype.getConnectionPos || LiteGraph.LGraphNode.prototype.getConnectionPos;
+                return fn.call(this, isInput, this.properties.collapse_connections ? 0 : slotNumber, out);
             };
 
             // THE MIND TRICK: Safely calculate height without negative math crashes!
@@ -194,7 +197,7 @@ app.registerExtension({
                 this.properties = this.properties || {};
 
                 const groupDefinitions = [
-                    { btnName: "grp_mode", label: "Mode Activation", widgets: ["primary_sampling", "spatial_upscale", "temporal_upscale", "restore_faces", "enable_colorfx", "video_mode", "image_strength", "img_compression", "audio_select", "identity_guidance_scale"] },
+                    { btnName: "grp_mode", label: "Mode Activation", widgets: ["primary_sampling", "spatial_upscale", "temporal_upscale", "restore_faces", "enable_colorfx", "enable_preview", "enable_final_video", "video_mode", "image_strength", "img_compression", "audio_select", "identity_guidance_scale"] },
                     { btnName: "grp_prompting", label: "Prompting", widgets: ["character_descriptions", "location_description", "scene_descriptions", "use_ollama", "ollama_url", "ollama_model"] },
                     { btnName: "grp_specs", label: "Video Specs", widgets: ["seed_number", "control_before_generate", "target_resolution", "length_in_seconds", "frame_rate"] },
                     { btnName: "grp_sampling", label: "Primary Sampling", widgets: ["primary_sampler_name", "primary_cfg", "primary_steps", "eta", "bongmath", "enable_nag"] },
@@ -210,7 +213,7 @@ app.registerExtension({
                     // ---------------------------
                     
                     { btnName: "grp_performance", label: "Performance", widgets: ["enable_fp16_accumulation", "sage_attention", "autoregressive_chunking", "chunk_size_seconds", "context_window_seconds", "chunks_feedforward", "clear_models_and_cache"] },
-                    { btnName: "grp_preview", label: "Preview", widgets: ["enable_preview", "stage1_preview"] }
+                    { btnName: "grp_output", label: "Output", widgets: ["stage1_preview", "final_video"] }
                 ];
 
                 // THE TOOLTIPS
@@ -484,7 +487,7 @@ api.addEventListener("trixope_ltxv_preview", (event) => {
                 return [width, height + 10]; 
             };
 
-            if (node.properties["groupState_grp_preview"] === false) {
+            if (node.properties["groupState_grp_output"] === false) {
                 previewWidget.origComputeSize = previewWidget.computeSize;
                 previewWidget.computeSize = () => [0, 0];
                 previewWidget.hidden = true;
@@ -493,17 +496,18 @@ api.addEventListener("trixope_ltxv_preview", (event) => {
                 previewWidget.last_y = undefined;
             }
 
-            const origOnResize = node.onResize;
-            node.onResize = function(size) {
-                if (origOnResize) origOnResize.apply(this, arguments);
-                if (previewWidget.element) {
-                    let ratio = 9 / 16;
-                    if (previewWidget.element.videoWidth > 0) {
-                        ratio = previewWidget.element.videoHeight / previewWidget.element.videoWidth;
+            if (!node._hasPreviewResizeHook) {
+                node._hasPreviewResizeHook = true;
+                const origOnResize = node.onResize;
+                node.onResize = function(size) {
+                    if (origOnResize) origOnResize.apply(this, arguments);
+                    const pWidget = this.widgets && this.widgets.find(w => w.name === "stage1_preview");
+                    if (pWidget && pWidget.element) {
+                        let ratio = (pWidget.element.videoWidth > 0) ? (pWidget.element.videoHeight / pWidget.element.videoWidth) : (9 / 16);
+                        pWidget.element.style.height = (size[0] * ratio) + "px";
                     }
-                    previewWidget.element.style.height = (size[0] * ratio) + "px";
-                }
-            };
+                };
+            }
 
             const origOnRemoved = node.onRemoved;
             node.onRemoved = function() {
@@ -533,6 +537,70 @@ api.addEventListener("trixope_ltxv_preview", (event) => {
     }
 });
 
+// --- MASTER FINAL VIDEO PREVIEW RECEIVER (AUTO-REPLACE PREVIEW) ---
+api.addEventListener("trixope_ltxv_final_video", (event) => {
+    const data = event.detail;
+    const node = app.graph.getNodeById(data.node);
+
+    if (node) {
+        // Automatically unload and remove the mid-generation stage 1 preview widget if active
+        let stage1Widget = node.widgets && node.widgets.find(w => w.name === "stage1_preview");
+        if (stage1Widget) {
+            if (stage1Widget.element) {
+                stage1Widget.element.pause();
+                stage1Widget.element.removeAttribute('src');
+                stage1Widget.element.load();
+            }
+            node.removeWidget(stage1Widget);
+        }
+
+        let finalWidget = node.widgets && node.widgets.find(w => w.name === "final_video");
+
+        if (!finalWidget) {
+            const videoEl = document.createElement("video");
+            videoEl.style.width = "100%";
+            videoEl.style.objectFit = "contain";
+            videoEl.controls = true; 
+            videoEl.autoplay = true;
+            videoEl.loop = true;
+            videoEl.muted = true;
+
+            finalWidget = node.addDOMWidget("final_video", "preview", videoEl, {
+                serialize: false,
+                hideOnZoom: false
+            });
+
+            finalWidget.computeSize = function(width) {
+                if (!this.element || !this.element.getAttribute('src')) {
+                    this.element.style.height = "0px";
+                    return [width, 0];
+                }
+                let height = (width * 9) / 16; 
+                if (this.element && this.element.videoWidth > 0) {
+                    const ratio = this.element.videoHeight / this.element.videoWidth;
+                    height = width * ratio;
+                }
+                this.element.style.height = height + "px";
+                return [width, height + 10]; 
+            };
+
+            if (node.properties["groupState_grp_output"] === false) {
+                finalWidget.origComputeSize = finalWidget.computeSize;
+                finalWidget.computeSize = () => [0, 0];
+                finalWidget.hidden = true;
+                if (finalWidget.element) finalWidget.element.style.display = "none";
+            }
+        }
+
+        finalWidget.element.src = api.apiURL(`/view?filename=${data.filename}&type=${data.type}&t=${Date.now()}`);
+        finalWidget.element.onloadedmetadata = () => {
+            node.setSize([node.size[0], Math.max(node.size[1], node.computeSize([node.size[0], node.size[1]])[1])]);
+            app.graph.setDirtyCanvas(true, true);
+        };
+        finalWidget.element.play().catch(e => console.warn("Master playback autoplay blocked: ", e));
+    }
+});
+
 api.addEventListener("executing", (event) => {
     const nodeId = event.detail;
     if (!nodeId) return;
@@ -541,6 +609,7 @@ api.addEventListener("executing", (event) => {
     if (node && node.type === "FilmAuteur_LTX") {
         let toggleWidget = node.widgets && node.widgets.find(w => w.name === "enable_preview");
         let previewWidget = node.widgets && node.widgets.find(w => w.name === "stage1_preview");
+        let finalWidget = node.widgets && node.widgets.find(w => w.name === "final_video");
 
         if (toggleWidget && !toggleWidget.value && previewWidget) {
             if (previewWidget.element) {
@@ -549,8 +618,17 @@ api.addEventListener("executing", (event) => {
                 previewWidget.element.load();
             }
             node.removeWidget(previewWidget);
-            app.graph.setDirtyCanvas(true, true);
         }
+        // Added cleanup routine
+        if (finalWidget) {
+            if (finalWidget.element) {
+                finalWidget.element.pause();
+                finalWidget.element.removeAttribute('src');
+                finalWidget.element.load();
+            }
+            node.removeWidget(finalWidget);
+        }
+        app.graph.setDirtyCanvas(true, true);
     }
 });
 
