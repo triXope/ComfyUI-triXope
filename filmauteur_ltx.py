@@ -2928,8 +2928,9 @@ Output only the prompt. Nothing before it, nothing after it."""
                 input_dtype = v_tile.dtype
 
                 target_model = upscaler_model.model if hasattr(upscaler_model, "model") else upscaler_model
-                v_tile_up = video_vae.first_stage_model.per_channel_statistics.un_normalize(v_tile.to(dtype=model_dtype, device=device_up))
-                v_tile_up = target_model(v_tile_up)
+                v_tile_unnorm = video_vae.first_stage_model.per_channel_statistics.un_normalize(v_tile.to(dtype=model_dtype, device=device_up))
+                v_tile_raw = target_model(v_tile_unnorm)
+                v_tile_up = video_vae.first_stage_model.per_channel_statistics.normalize(v_tile_raw).to(dtype=input_dtype, device=device)
 
                 # Flush VRAM allocated by the upscaler before entering the diffusion sampler
                 comfy.model_management.soft_empty_cache()
