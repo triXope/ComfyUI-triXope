@@ -2717,7 +2717,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                         if chunk_end <= chunk_start: chunk_end = chunk_start + 1
                             
                         v_tile = v_samps_prev[:, :, overlap_start:chunk_end]
-                        v_tile_decoded = video_vae.decode(v_tile).cpu()
+                        v_tile_decoded = safe_vae_decode(video_vae, v_tile).cpu()
                         if v_tile_decoded.ndim == 5:
                             v_tile_decoded = v_tile_decoded.squeeze(0)
                             
@@ -2792,7 +2792,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                         split_latent = v_samps_prev[:, :, start_lat : end_lat]
                         
                         if split_latent.shape[2] > 0:
-                            decoded_shot = video_vae.decode(split_latent).cpu()
+                            decoded_shot = safe_vae_decode(video_vae, split_latent).cpu()
                             decoded_shot = decoded_shot.view(-1, out_h, out_w, 3)
                         else:
                             break
@@ -3554,6 +3554,22 @@ Output only the prompt. Nothing before it, nothing after it."""
             }
             debug_save_latent(final_latent, "stage3_temporal")
 
+        def safe_vae_decode(vae_model, latent_tile):
+            with torch.no_grad():
+                if hasattr(vae_model, "decode_tiled"):
+                    try:
+                        # Conservative 256x256 tile size prevents memory pressure warnings
+                        return vae_model.decode_tiled(
+                            latent_tile,
+                            tile_x=256,
+                            tile_y=256,
+                            tile_t=8,
+                            overlap=2
+                        )
+                    except Exception as e:
+                        print(f"LTXV Custom Warning: Tiled VAE decode failed ({e}), falling back to standard decode.")
+                return vae_model.decode(latent_tile)
+
         # ==========================================
         # 8. INTEGRATED VAE DECODE, RESTORE & POST-SLICE A/V
         # ==========================================
@@ -3561,6 +3577,10 @@ Output only the prompt. Nothing before it, nothing after it."""
         out_audio = None
         out_video = None
         
+        # Flush diffusion models from VRAM before VAE decoding begins
+        comfy.model_management.free_memory(12 * 1024 * 1024 * 1024, device)
+        comfy.model_management.soft_empty_cache()
+
         if decode:
             print(f"\n--- Running Integrated Decode & Slicer ({num_prompts} shots) ---")
             
@@ -3838,7 +3858,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                                 if chunk_end <= chunk_start: chunk_end = chunk_start + 1
                                     
                                 v_tile = final_video_samples[:, :, overlap_start:chunk_end]
-                                v_tile_decoded = video_vae.decode(v_tile).cpu()
+                                v_tile_decoded = safe_vae_decode(video_vae, v_tile).cpu()
                                 v_tile_decoded = v_tile_decoded.view(-1, out_h, out_w, 3)
                                 current_valid_frames = v_tile_decoded.shape[0]
                                 
@@ -3921,7 +3941,7 @@ Output only the prompt. Nothing before it, nothing after it."""
                             split_latent = final_video_samples[:, :, start_lat : end_lat]
                             
                             if split_latent.shape[2] > 0:
-                                decoded_shot = video_vae.decode(split_latent).cpu()
+                                decoded_shot = safe_vae_decode(video_vae, split_latent).cpu()
                                 decoded_shot = decoded_shot.view(-1, out_h, out_w, 3)
                             else:
                                 break
