@@ -361,6 +361,25 @@ def preprocess_compression(image: torch.Tensor, crf=29):
     tensor = torch.tensor(image_array, dtype=image.dtype, device=image.device) / 255.0
     return tensor
 
+def safe_vae_decode(vae_model, latent_tile):
+    with torch.no_grad():
+        comfy.model_management.soft_empty_cache()
+        v_lats = latent_tile.shape[2] if (hasattr(latent_tile, "shape") and latent_tile.ndim >= 3) else 16
+        if hasattr(vae_model, "decode_tiled"):
+            for tile_size in [512, 256, 128]:
+                try:
+                    # Keep tile_t equal to full temporal length so VAE tiling is purely spatial (X/Y)
+                    return vae_model.decode_tiled(
+                        latent_tile,
+                        tile_x=tile_size,
+                        tile_y=tile_size,
+                        tile_t=v_lats,
+                        overlap=2
+                    )
+                except Exception as e:
+                    comfy.model_management.soft_empty_cache()
+        return vae_model.decode(latent_tile)
+
 RESOLUTION_OPTIONS = [
     "--- 𝟭:𝟭 𝗔𝘀𝗽𝗲𝗰𝘁 𝗥𝗮𝘁𝗶𝗼 (𝗦𝗾𝘂𝗮𝗿𝗲) ---",
     "512\u00A0 × 512\u00A0 — Fast low-VRAM generation",
@@ -722,7 +741,10 @@ class FilmAuteur_LTX:
         image_ref_str = image_strength
         first_frame_str = image_strength
 
-        if audio_select == "internal":
+        if not primary_sampling and audio is not None:
+            load_audio_from_file = True
+            bypass_audio_ref = True
+        elif audio_select == "internal":
             load_audio_from_file = False
             bypass_audio_ref = True
         elif audio_select == "source":
@@ -2470,25 +2492,53 @@ Output only the prompt. Nothing before it, nothing after it."""
                 print("-> Routing input image(s) directly to pixel-level post-processing.")
                 sampled_tensor = None
             elif (latent_override is None) and (images is not None):
-                print("\n--- Primary Sampling Bypassed: Chunk-Encoding Input Image(s) to Latent Space ---")
+                print("\n--- Primary Sampling Bypassed: Smooth Causal VAE Encoding Input Image(s) ---")
                 img_in = images if images.ndim == 4 else images.squeeze(0)
                 if img_in.shape[-1] > 3:
                     img_in = img_in[..., :3]
 
-                # --- VRAM-SAFE CHUNKED VAE ENCODING ---
-                v_chunks = []
-                encode_chunk_size = 16
+                total_input_frames = img_in.shape[0]
 
-                for frame_idx in range(0, img_in.shape[0], encode_chunk_size):
-                    img_slice = img_in[frame_idx : frame_idx + encode_chunk_size]
+                # Attempt unbroken continuous VAE encoding to preserve 100% temporal continuity
+                try:
                     with torch.no_grad():
-                        lat_chunk = video_vae.encode(img_slice).to(device="cpu", dtype=torch.float16)
-                    v_chunks.append(lat_chunk)
-                    import gc
-                    gc.collect()
-                    comfy.model_management.soft_empty_cache()
+                        encoded_v = video_vae.encode(img_in).to(device="cpu", dtype=torch.float16)
+                    print("-> Smooth full-pass VAE encoding complete.")
+                except Exception as e:
+                    print(f"-> Full-pass VAE encode failed ({e}). Switching to Causal Overlapped Chunk Encoding...")
+                    
+                    # Overlapped Chunk Encoder aligned to 8k + 1 frames (33 frames = 5 latents)
+                    v_chunks = []
+                    chunk_size = 33  # Matches 8k + 1 alignment (5 latents)
+                    overlap = 8      # 8 frames overlap = 1 latent overlap
+                    step = chunk_size - overlap
 
-                encoded_v = torch.cat(v_chunks, dim=2)
+                    start_idx = 0
+                    while start_idx < total_input_frames:
+                        end_idx = min(start_idx + chunk_size, total_input_frames)
+                        img_slice = img_in[start_idx:end_idx]
+
+                        if img_slice.shape[0] < 9 and len(v_chunks) > 0:
+                            break
+
+                        with torch.no_grad():
+                            lat_chunk = video_vae.encode(img_slice).to(device="cpu", dtype=torch.float16)
+
+                        if start_idx == 0:
+                            v_chunks.append(lat_chunk)
+                        else:
+                            # Drop the 1 overlapping latent frame at boundary to preserve unbroken causal motion
+                            v_chunks.append(lat_chunk[:, :, 1:])
+
+                        if end_idx >= total_input_frames:
+                            break
+
+                        start_idx += step
+                        import gc
+                        gc.collect()
+                        comfy.model_management.soft_empty_cache()
+
+                    encoded_v = torch.cat(v_chunks, dim=2)
 
                 # Dynamically generate matching audio latent canvas for downstream pipeline
                 v_frames_encoded = ((encoded_v.shape[2] - 1) * 8) + 1 if encoded_v.shape[2] > 0 else 0
@@ -2500,9 +2550,6 @@ Output only the prompt. Nothing before it, nothing after it."""
                     a_override_slice[:, :, :copy_len] = audio_samples[:, :, :copy_len]
 
                 sampled_tensor = comfy.nested_tensor.NestedTensor((encoded_v, a_override_slice)).to(device)
-            else:
-                print("\n--- Primary Sampling Bypassed (Injecting Override/Base Tensors) ---")
-                sampled_tensor = comfy.nested_tensor.NestedTensor((video_samples, audio_samples)).to(device)
 
         # ==========================================
         # DEBUG: LATENT SAVER HELPER
@@ -3554,22 +3601,6 @@ Output only the prompt. Nothing before it, nothing after it."""
             }
             debug_save_latent(final_latent, "stage3_temporal")
 
-        def safe_vae_decode(vae_model, latent_tile):
-            with torch.no_grad():
-                if hasattr(vae_model, "decode_tiled"):
-                    try:
-                        # Conservative 256x256 tile size prevents memory pressure warnings
-                        return vae_model.decode_tiled(
-                            latent_tile,
-                            tile_x=256,
-                            tile_y=256,
-                            tile_t=8,
-                            overlap=2
-                        )
-                    except Exception as e:
-                        print(f"LTXV Custom Warning: Tiled VAE decode failed ({e}), falling back to standard decode.")
-                return vae_model.decode(latent_tile)
-
         # ==========================================
         # 8. INTEGRATED VAE DECODE, RESTORE & POST-SLICE A/V
         # ==========================================
@@ -4080,7 +4111,10 @@ Output only the prompt. Nothing before it, nothing after it."""
             # ==========================================
             # AUDIO MASTERING & MUXING (SKIPPED FOR PASSTHROUGH)
             # ==========================================
-            if not pure_image_passthrough:
+            if not primary_sampling:
+                print("-> Base Generation OFF: Passing connected audio directly to output...")
+                out_audio = audio
+            elif not pure_image_passthrough:
                 final_video_length_seconds = out_image.shape[0] / current_fps
                 exact_target_samples = int(final_video_length_seconds * sample_rate)
                 
