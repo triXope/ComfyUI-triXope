@@ -1,3 +1,25 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:77a6bde95c5d4463eee419a179d61a1ad7b3b6c3d653fae42d0467b9c2811027
-size 429
+class Options:
+    img2img_background_color = "#ffffff"  # Set to white for now
+
+
+class State:
+    interrupted = False
+
+    def begin(self):
+        pass
+
+    def end(self):
+        pass
+
+
+opts = Options()
+state = State()
+
+# Will only ever hold 1 upscaler
+sd_upscalers = [None]
+# The upscaler usable by ComfyUI nodes
+actual_upscaler = None
+
+# Batch of images to upscale
+batch = []
+batch_as_tensor = None

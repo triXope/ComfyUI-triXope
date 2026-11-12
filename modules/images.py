@@ -1,3 +1,8 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:a18c6735f8c501088a6ccdf5da0e4d090a414b645a07f06685190c20d75a54d5
-size 237
+from PIL import Image
+
+
+def flatten(img, bgcolor):
+    # Replace transparency with bgcolor
+    if img.mode in ("RGB"):
+        return img
+    return Image.alpha_composite(Image.new("RGBA", img.size, bgcolor), img).convert("RGB")
