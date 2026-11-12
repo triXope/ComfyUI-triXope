@@ -1,3 +1,19 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:cf1b8d92c371f76b2a67eb377d2cd18bab4dc2d4e39bb2c1531c1216c10e6033
-size 526
+from copy import deepcopy
+
+from basicsr.utils.registry import METRIC_REGISTRY
+from .psnr_ssim import calculate_psnr, calculate_ssim
+
+__all__ = ['calculate_psnr', 'calculate_ssim']
+
+
+def calculate_metric(data, opt):
+    """Calculate metric from data and options.
+
+    Args:
+        opt (dict): Configuration. It must constain:
+            type (str): Model type.
+    """
+    opt = deepcopy(opt)
+    metric_type = opt.pop('type')
+    metric = METRIC_REGISTRY.get(metric_type)(**data, **opt)
+    return metric

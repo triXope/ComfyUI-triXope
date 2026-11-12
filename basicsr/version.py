@@ -1,3 +1,5 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:0789a12bf7d7cde6da5f9fbaf81165d4ba99dd9bc521e839442e5239e9a654bd
-size 133
+# GENERATED VERSION FILE
+# TIME: Sun Aug  7 15:14:26 2022
+__version__ = '1.3.2'
+__gitsha__ = '6f94023'
+version_info = (1, 3, 2)
