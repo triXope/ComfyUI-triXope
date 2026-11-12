@@ -1,3 +1,40 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:f61779a683aa081f3c81f0a4fac3a65bb644511eaa5c7ced096cd081ed7904f7
-size 2400
+# triXope — ComfyUI custom node requirements
+#
+# Install into the same Python environment ComfyUI runs in:
+#     pip install -r requirements.txt
+#
+# ComfyUI already ships these, and reinstalling them can replace a working CUDA build:
+#     torch, torchvision, torchaudio, numpy, Pillow, aiohttp
+# They are deliberately not listed here.
+#
+# Optional extras are commented out at the bottom; uncomment the ones your workflows use.
+
+# --- Core video / image / audio dependencies --------------------------------------
+av                    # PyAV: Video Timeline Editor, H3 and LTXV video I/O
+imageio-ffmpeg        # bundled ffmpeg for Panorama 360 Rotate (system ffmpeg also works)
+kornia                # LTXV latent/patch helpers
+librosa               # audio analysis and resampling
+opencv-python         # ColorFX, HSV match, H3 Upscaler, face tracking
+psutil                # device_manager and free-RAM checks
+requests              # Ollama / HTTP-backed writing nodes
+safetensors           # latent load/save and the H3 latent upscaler
+scipy                 # LUT interpolation (falls back gracefully when absent)
+tqdm                  # progress bars in batch loaders
+
+# --- Feature extras ---------------------------------------------------------------
+transformers          # LTXV prompt transcription (guarded import)
+ultralytics           # YOLO face detection in the H3 Upscaler (large; comment out if unused)
+openai-whisper        # Screenwriter audio-to-screenplay (large; comment out if unused)
+GitPython             # ComfyUI revision shown by GroupMonitor (guarded import)
+
+# --- Optional accelerators / legacy face restoration ------------------------------
+# basicsr             # face restoration; needs a compatible Python/torchvision build
+# facexlib            # face restoration helper used with basicsr
+# sageattention       # SageAttention 1/2; CUDA build, install per its README
+# sageattn3           # SageAttention 3 (Blackwell); CUDA build, install per its README
+# sam3                # Meta SAM3 detector; install from source or vendor into vendor/sam3
+
+# --- Not pip packages -------------------------------------------------------------
+# taehv.py                          optional fast VAE decode, place beside __init__.py
+# dlss5/ + install_runtime.py       optional DLSS 5 runtime
+# repositories/ultimate_sd_upscale  auto-downloaded by __init__.py on first start
