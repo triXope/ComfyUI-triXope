@@ -9683,16 +9683,34 @@ class UltimateSDUpscaleMiniMaxH3:
         blur = pil_image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
         return Image.blend(pil_image, ImageChops.soft_light(pil_image, blur), opacity)
 
+    @staticmethod
+    def _color_fx_chunk_frames(tensor_images, budget_bytes=256 * 1024 * 1024):
+        """Frames per chunk for a bounded temporary tensor in the Color FX pass."""
+        frame_bytes = max(1, int(tensor_images.shape[1]) * int(tensor_images.shape[2]) *
+                          int(tensor_images.shape[3]) * int(tensor_images.element_size()))
+        return max(1, min(int(tensor_images.shape[0]), int(budget_bytes // frame_bytes)))
+
     def _apply_gamma_torch(self, tensor_images, gamma_value):
         if gamma_value == 1.0: return tensor_images
-        return torch.pow(tensor_images.clamp(1e-5, 1.0), 1.0 / max(gamma_value, 0.01))
+        exponent = 1.0 / max(gamma_value, 0.01)
+        step = self._color_fx_chunk_frames(tensor_images)
+        for start in range(0, tensor_images.shape[0], step):
+            part = tensor_images[start:start + step]
+            part.clamp_(1e-5, 1.0).pow_(exponent)
+        return tensor_images
 
     def _apply_simple_film_grain_torch(self, tensor_images, intensity, monochrome):
         if intensity == 0.: return tensor_images
         B, H, W, C = tensor_images.shape
-        noise = torch.randn((B, H, W, 1 if monochrome else C), device=tensor_images.device) * intensity
-        if monochrome and C > 1: noise = noise.repeat(1, 1, 1, C)
-        return (tensor_images + noise).clamp(0.0, 1.0)
+        step = self._color_fx_chunk_frames(tensor_images)
+        for start in range(0, B, step):
+            part = tensor_images[start:start + step]
+            noise = torch.randn((part.shape[0], H, W, 1 if monochrome else C),
+                                device=part.device, dtype=part.dtype) * intensity
+            if monochrome and C > 1:
+                noise = noise.expand(-1, -1, -1, C)
+            part.add_(noise).clamp_(0.0, 1.0)
+        return tensor_images
 
     def _apply_vignette_torch(self, tensor_images, intensity, cx_r, cy_r):
         if intensity == 0.: return tensor_images
@@ -9702,49 +9720,57 @@ class UltimateSDUpscaleMiniMaxH3:
         dist = torch.sqrt(X**2 + Y**2)
         max_dist = torch.sqrt(torch.tensor(max(cx**2+cy**2, (W-cx)**2+cy**2, cx**2+(H-cy)**2, (W-cx)**2+(H-cy)**2), device=tensor_images.device))
         v_mask = (1.0 - (dist / max(1.0, max_dist))**2 * intensity).clamp(0.0, 1.0).unsqueeze(0).unsqueeze(-1)
-        return (tensor_images * v_mask).clamp(0.0, 1.0)
+        step = self._color_fx_chunk_frames(tensor_images)
+        for start in range(0, B, step):
+            part = tensor_images[start:start + step]
+            part.mul_(v_mask).clamp_(0.0, 1.0)
+        return tensor_images
 
     def _apply_color_fx(self, images, p):
         """Color FX stage. Same order and maths as FilmAuteur_LTX: shadows/highlights/HDR -> brightness/contrast/
         colour -> LUT -> sharpness/detail -> blurs -> chromatic aberration/scanlines/soft light (PIL), then
-        gamma -> film grain -> vignette (tensor). images: [B,H,W,C] float 0..1."""
-        alpha = images[..., 3:] if images.shape[-1] > 3 else None
-        processed = []
-        for i in range(images.shape[0]):
-            pil_image = tensor2pil(images[i:i + 1, ..., :3]).convert("RGB")
-            if p["enable_color_correction"]:
-                pil_image = self._apply_shadows_highlights(pil_image, p["shadow_intensity"], p["highlight_intensity"], p["hdr_intensity"])
-                pil_image = self._apply_color_enhancements(pil_image, p["brightness"], p["contrast"], p["saturation"], p["enhance_color"])
-            if p["enable_lut_processing"] and p["lut_name"] != "None":
-                pil_image = self._apply_lut_effect(pil_image, p["lut_name"], p["lut_strength"], p["lut_log_process"])
-            if p["enable_enhancements"]:
-                pil_image = self._apply_sharpness_detail(pil_image, p["sharpness"], p["edge_enhance_strength"], p["detail_enhance_strength"])
-            if p["enable_blur_effects"]:
-                pil_image = self._apply_blurs(pil_image, p["blur_radius"], p["gaussian_blur_radius"])
-                if p["radial_blur_strength"] > 0.0:
-                    pil_image = self._apply_radial_blur(pil_image, p["radial_blur_strength"], p["radial_blur_center_x"], p["radial_blur_center_y"], p["radial_blur_focus_spread"], p["radial_blur_steps"])
+        gamma -> film grain -> vignette (tensor). images: [B,H,W,C] float 0..1.
+
+        The batch can be hundreds of 1080p/4K frames, so every frame is written straight back into
+        ``images`` instead of being collected and torch.cat'd into a second full batch, and the tensor
+        effects run in bounded chunks.  This removes the multi-gigabyte ``tensor + noise`` allocation
+        that exhausted RAM on long latent lists.  RGB is rewritten; an alpha channel is left untouched."""
+        with torch.no_grad():
+            for i in range(images.shape[0]):
+                pil_image = tensor2pil(images[i:i + 1, ..., :3]).convert("RGB")
+                if p["enable_color_correction"]:
+                    pil_image = self._apply_shadows_highlights(pil_image, p["shadow_intensity"], p["highlight_intensity"], p["hdr_intensity"])
+                    pil_image = self._apply_color_enhancements(pil_image, p["brightness"], p["contrast"], p["saturation"], p["enhance_color"])
+                if p["enable_lut_processing"] and p["lut_name"] != "None":
+                    pil_image = self._apply_lut_effect(pil_image, p["lut_name"], p["lut_strength"], p["lut_log_process"])
+                if p["enable_enhancements"]:
+                    pil_image = self._apply_sharpness_detail(pil_image, p["sharpness"], p["edge_enhance_strength"], p["detail_enhance_strength"])
+                if p["enable_blur_effects"]:
+                    pil_image = self._apply_blurs(pil_image, p["blur_radius"], p["gaussian_blur_radius"])
+                    if p["radial_blur_strength"] > 0.0:
+                        pil_image = self._apply_radial_blur(pil_image, p["radial_blur_strength"], p["radial_blur_center_x"], p["radial_blur_center_y"], p["radial_blur_focus_spread"], p["radial_blur_steps"])
+                if p["enable_stylistic_effects"]:
+                    ca = [p["chromatic_aberration_r_x"], p["chromatic_aberration_r_y"], p["chromatic_aberration_b_x"], p["chromatic_aberration_b_y"]]
+                    needs_pil = any(v != 0 for v in ca) or p["chromatic_blur_amount"] > 0 or p["scanline_intensity"] > 0.0 or p["soft_light_opacity"] > 0.0
+                    if needs_pil:
+                        if any(v != 0 for v in ca) or p["chromatic_blur_amount"] > 0:
+                            pil_image = self._apply_chromatic_aberration(pil_image, ca[0], ca[1], ca[2], ca[3], p["chromatic_blur_amount"])
+                        if p["scanline_intensity"] > 0.0:
+                            pil_image = self._apply_scanlines(pil_image, p["scanline_intensity"])
+                        if p["soft_light_opacity"] > 0.0:
+                            pil_image = self._apply_soft_light(pil_image, p["soft_light_opacity"], p["soft_light_blur_radius"])
+                images[i:i + 1, ..., :3] = pil2tensor(pil_image).to(images.device, images.dtype)
+            # Tensor effects run on the RGB view only: when the batch carries an alpha
+            # channel it must pass through untouched, exactly as the old cat() path did.
+            rgb = images[..., :3]
+            if p["enable_color_correction"] and p["gamma"] != 1.0:
+                self._apply_gamma_torch(rgb, p["gamma"])
             if p["enable_stylistic_effects"]:
-                ca = [p["chromatic_aberration_r_x"], p["chromatic_aberration_r_y"], p["chromatic_aberration_b_x"], p["chromatic_aberration_b_y"]]
-                needs_pil = any(v != 0 for v in ca) or p["chromatic_blur_amount"] > 0 or p["scanline_intensity"] > 0.0 or p["soft_light_opacity"] > 0.0
-                if needs_pil:
-                    if any(v != 0 for v in ca) or p["chromatic_blur_amount"] > 0:
-                        pil_image = self._apply_chromatic_aberration(pil_image, ca[0], ca[1], ca[2], ca[3], p["chromatic_blur_amount"])
-                    if p["scanline_intensity"] > 0.0:
-                        pil_image = self._apply_scanlines(pil_image, p["scanline_intensity"])
-                    if p["soft_light_opacity"] > 0.0:
-                        pil_image = self._apply_soft_light(pil_image, p["soft_light_opacity"], p["soft_light_blur_radius"])
-            processed.append(pil2tensor(pil_image))
-        out = torch.cat(processed, dim=0).to(images.device)
-        if p["enable_color_correction"] and p["gamma"] != 1.0:
-            out = self._apply_gamma_torch(out, p["gamma"])
-        if p["enable_stylistic_effects"]:
-            if p["simple_film_grain_intensity"] > 0.0:
-                out = self._apply_simple_film_grain_torch(out, p["simple_film_grain_intensity"], p["simple_film_grain_monochrome"])
-            if p["vignette_intensity"] > 0.0:
-                out = self._apply_vignette_torch(out, p["vignette_intensity"], p["vignette_center_x"], p["vignette_center_y"])
-        if alpha is not None:
-            out = torch.cat([out, alpha.to(out.device, out.dtype)], dim=-1)
-        return out
+                if p["simple_film_grain_intensity"] > 0.0:
+                    self._apply_simple_film_grain_torch(rgb, p["simple_film_grain_intensity"], p["simple_film_grain_monochrome"])
+                if p["vignette_intensity"] > 0.0:
+                    self._apply_vignette_torch(rgb, p["vignette_intensity"], p["vignette_center_x"], p["vignette_center_y"])
+        return images
 
     def _face_init(self, orig_work, crop_mask, fx, fy, fw, fh, x1, y1, crop_w, crop_h, work_h, work_w,
                    master_face, master_alpha, master_box, master_aspect, reference_strength,

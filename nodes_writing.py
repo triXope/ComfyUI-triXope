@@ -18,12 +18,118 @@ import time
 import queue
 import random
 import threading
+import shutil
 
 
 _SCREENPLAY_RUN = threading.local()
 
 
 _SCRIPT_OVERRIDE_MODES = ("off", "text", "audio")
+
+# --- Local (in-process) text-generation models -------------------------------------
+# These are ordinary ComfyUI text encoders.  ComfyUI's CLIP loader detects the model
+# from its weights, and the text encoder provides the tokenize/generate/decode path
+# used by ComfyUI's own Generate Text node, so no server or extra inference package is
+# involved.  The picker reuses the existing `ollama_model` widget instead of adding a
+# new one, which keeps every saved workflow's widget values in their original slots.
+# ComfyUI's native Gemma 4 detection covers E2B, E4B, 12B and 31B.  Only the sizes with a
+# downloadable Comfy-Org single-file are listed below; 26B A4B is not natively supported
+# and needs a GGUF/llama.cpp loader, which is the third-party path this feature avoids.
+_LOCAL_LLM_PREFIX = "Local: "
+_LOCAL_LLM_MODELS = {
+    "Local: Gemma 4 E4B (fp8, 9.1 GB)": {
+        "filename": "gemma4_e4b_it_fp8_scaled.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_e4b_it_fp8_scaled.safetensors",
+        "size": 9057782194,
+    },
+    "Local: Gemma 4 12B (int8, 12.1 GB)": {
+        "filename": "gemma4_12b_int8_convrot.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_12b_int8_convrot.safetensors",
+        "size": 12055234634,
+    },
+    "Local: Gemma 4 E2B (int8, 5.2 GB)": {
+        "filename": "gemma4_e2b_it_int8_convrot.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_e2b_it_int8_convrot.safetensors",
+        "size": 5199997904,
+    },
+    "Local: Qwen3.5 4B (bf16, 9.3 GB)": {
+        "filename": "qwen3.5_4b_bf16.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_4b_bf16.safetensors",
+        "size": 9319828320,
+    },
+    "Local: Qwen3.5 9B (int8, 9.8 GB)": {
+        "filename": "qwen3.5_9b_int8_convrot.safetensors",
+        "url": "https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_9b_int8_convrot.safetensors",
+        "size": 9748121532,
+    },
+}
+_LOCAL_LLM_CACHE = {}
+
+
+def _local_llm_spec(model_name):
+    """Return the download/load spec for a Local: picker value, else None."""
+    name = str(model_name or "").strip()
+    if not name.startswith(_LOCAL_LLM_PREFIX):
+        return None
+    return _LOCAL_LLM_MODELS.get(name)
+
+
+def _download_local_llm(spec):
+    """Download one text encoder into ComfyUI/models/text_encoders, once."""
+    import folder_paths
+    roots = folder_paths.get_folder_paths("text_encoders")
+    if not roots:
+        raise RuntimeError(
+            "ComfyUI has no text_encoders folder; cannot install %s" % spec["filename"])
+    target = folder_paths.get_full_path("text_encoders", spec["filename"])
+    if target:
+        return target
+    root = roots[0]
+    os.makedirs(root, exist_ok=True)
+    target = os.path.join(root, spec["filename"])
+    part = target + ".part"
+    free = shutil.disk_usage(root).free
+    if free < spec["size"] + (512 * 1024 * 1024):
+        raise RuntimeError(
+            "Not enough disk space for %s: need %.1f GB, %.1f GB free in %s"
+            % (spec["filename"], spec["size"] / 1e9, free / 1e9, root))
+    print("  ├─ [Local LLM] Downloading %s (%.1f GB) on first use..." %
+          (spec["filename"], spec["size"] / 1e9))
+    print("  │    %s" % spec["url"])
+    request = urllib.request.Request(spec["url"], headers={"User-Agent": "ComfyUI-triXope"})
+    downloaded = 0
+    next_report = 5
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, open(part, "wb") as handle:
+            total = int(response.headers.get("Content-Length") or spec["size"] or 0)
+            while True:
+                _check_processing_interrupted()
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                handle.write(block)
+                downloaded += len(block)
+                if total:
+                    percent = int(downloaded * 100 / total)
+                    if percent >= next_report:
+                        print("  │    [Local LLM] %d%% (%.1f / %.1f GB)" %
+                              (percent, downloaded / 1e9, total / 1e9))
+                        next_report = min(100, percent + 5)
+        if downloaded <= 0:
+            raise RuntimeError("download returned no data")
+        os.replace(part, target)
+    except BaseException:
+        try:
+            if os.path.isfile(part):
+                os.remove(part)
+        except OSError:
+            pass
+        raise
+    if spec.get("size") and abs(os.path.getsize(target) - spec["size"]) > (16 * 1024 * 1024):
+        print("  ├─ ⚠️ [Local LLM] %s is %d bytes, expected %d; using it anyway." %
+              (spec["filename"], os.path.getsize(target), spec["size"]))
+    print("  └─ [Local LLM] Installed %s" % target)
+    return target
 
 # Bigger Whisper checkpoints win when they are already cached locally, so a normal
 # install never has to download anything mid-workflow.
@@ -3150,8 +3256,14 @@ class ScreenplayFormatterNode:
                 "auto_capitalize_headers": ("BOOLEAN", {"default": True}),
                 "output_format": (["Standard Plain Text", "HTML Visual Script", "Fountain Syntax", "Print-Ready (US Letter)"], {"default": "Standard Plain Text"}),
                 "default_aspect_ratio": (["16:9", "2.39:1", "4:3", "9:16", "1:1"], {"default": "16:9"}),
-                "use_ollama_ai": ("BOOLEAN", {"default": False}),
-                "ollama_model": ("STRING", {"default": "llama3"}),
+                "use_ollama_ai": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Enables the Ollama HTTP backend. A connected clip input or a Local: ollama_model selection runs without this switch."
+                }),
+                "ollama_model": ("STRING", {
+                    "default": "llama3",
+                    "tooltip": "Ollama model name, or a Local: ... entry to run a text-generation model inside ComfyUI. A Local: entry downloads on first use and needs no Ollama server; connecting the optional clip input overrides this."
+                }),
                 "ollama_url": ("STRING", {"default": "http://127.0.0.1:11434"}),
                 "script_override_mode": (["off", "text", "audio"], {
                     "default": "off",
@@ -3179,7 +3291,7 @@ class ScreenplayFormatterNode:
                 "raw_script": ("STRING", {
                     "multiline": True,
                     "default": "",
-                    "tooltip": "Leave this blank with script_override_mode set to off and the Ollama model writes a complete original screenplay on its own: a random genre, unique characters and a random length, always a full three-act story with a beginning, middle and end, invented to fit the selected style_preset or custom_style. Requires use_ollama_ai."
+                    "tooltip": "Leave this blank with script_override_mode set to off and the AI model writes a complete original screenplay on its own: a random genre, unique characters and a random length, always a full three-act story with a beginning, middle and end, invented to fit the selected style_preset or custom_style. Requires an AI backend (a connected clip, a Local: model, or use_ollama_ai)."
                 }),
                 "characters_json": ("STRING", {"multiline": True, "default": "[]"}),
                 "locations_json": ("STRING", {"multiline": True, "default": "[]"}),
@@ -3188,6 +3300,9 @@ class ScreenplayFormatterNode:
                 "stored_generation": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
+                "clip": ("CLIP", {
+                    "tooltip": "Optional local text-generation model from a CLIP Loader (Gemma 3/4, Qwen 3.5). When connected, every AI stage runs in-process and Ollama is not used. It is the first optional input and adds no widget, so saved widget values do not move."
+                }),
                 "script_override_text": ("STRING", {
                     "forceInput": True,
                     "tooltip": "Screenplay text used when script_override_mode is text.",
@@ -3225,17 +3340,19 @@ class ScreenplayFormatterNode:
         return {"ui": {"stored_generation": [stored_generation]}, "result": tuple(outputs)}
 
     def process_screenplay(self, auto_capitalize_headers, output_format, default_aspect_ratio, use_ollama_ai, ollama_model, ollama_url, script_override_mode, trigger_words, raw_script, characters_json, locations_json, lock_last_generation=False, stored_generation="", script_override_text="", props_json="[]", script_override_audio=None,
-                    style_preset=DEFAULT_STYLE_PRESET, custom_style=""):
+                    style_preset=DEFAULT_STYLE_PRESET, custom_style="", clip=None):
         # Do not unload anything when this node was already stopped before it started.
         _check_processing_interrupted()
         previous_models = getattr(_SCREENPLAY_RUN, "ollama_models", None)
+        previous_clip = getattr(_SCREENPLAY_RUN, "clip", None)
         _SCREENPLAY_RUN.ollama_models = set()
+        _SCREENPLAY_RUN.clip = clip
         try:
             result = self._process_screenplay(
                 auto_capitalize_headers, output_format, default_aspect_ratio, use_ollama_ai, ollama_model,
                 ollama_url, script_override_mode, trigger_words, raw_script, characters_json, locations_json,
                 lock_last_generation, stored_generation, script_override_text, props_json, script_override_audio,
-                style_preset, custom_style)
+                style_preset, custom_style, clip)
         except BaseException as error:
             if _is_processing_interrupted(error):
                 self._cleanup_screenplay_run(ollama_url, "workflow stopped")
@@ -3253,6 +3370,13 @@ class ScreenplayFormatterNode:
                     pass
             else:
                 _SCREENPLAY_RUN.ollama_models = previous_models
+            if previous_clip is None:
+                try:
+                    del _SCREENPLAY_RUN.clip
+                except AttributeError:
+                    pass
+            else:
+                _SCREENPLAY_RUN.clip = previous_clip
 
     def _cleanup_screenplay_run(self, url, reason):
         """Release resources requested by this node, without unloading other ComfyUI models."""
@@ -3283,7 +3407,7 @@ class ScreenplayFormatterNode:
             print(f"⚠️ [ScreenplayFormatter] Could not request Ollama to unload '{model}': {error}")
 
     def _process_screenplay(self, auto_capitalize_headers, output_format, default_aspect_ratio, use_ollama_ai, ollama_model, ollama_url, script_override_mode, trigger_words, raw_script, characters_json, locations_json, lock_last_generation=False, stored_generation="", script_override_text="", props_json="[]", script_override_audio=None,
-                    style_preset=DEFAULT_STYLE_PRESET, custom_style=""):
+                    style_preset=DEFAULT_STYLE_PRESET, custom_style="", clip=None):
         _check_processing_interrupted()
         if lock_last_generation:
             cached_outputs = self._decode_generation_cache(stored_generation, output_format)
@@ -3320,7 +3444,18 @@ class ScreenplayFormatterNode:
 
         # LLM availability is resolved before the script source is picked, because a blank
         # raw_script with script_override_mode=off is filled in by the model further down.
-        use_llm = bool(use_ollama_ai and str(ollama_model or "").strip() and ollama_model != "None / Ollama Offline")
+        # A connected CLIP wins; otherwise a Local: model is downloaded and loaded through
+        # ComfyUI's own text-encoder loader; otherwise the existing Ollama path applies.
+        local_spec = _local_llm_spec(ollama_model)
+        if clip is None and local_spec is not None:
+            clip = self._resolve_local_llm(ollama_model)
+            _SCREENPLAY_RUN.clip = clip
+        ollama_ready = bool(use_ollama_ai and str(ollama_model or "").strip()
+                            and ollama_model != "None / Ollama Offline"
+                            and local_spec is None)
+        llm_backend = ("Local CLIP" if clip is not None else
+                       ("Ollama" if ollama_ready else "disabled"))
+        use_llm = llm_backend != "disabled"
         tw = (trigger_words or "").strip()
 
         # One resolved look for the whole film: the reference plates and every shot share it,
@@ -3372,13 +3507,14 @@ class ScreenplayFormatterNode:
                         ollama_model, ollama_url, style_text)
                 else:
                     print("⚠️ [ScreenplayFormatter] raw_script is blank and script_override_mode is off, but "
-                          "Ollama is unavailable, so no screenplay can be invented; returning blank outputs.")
+                          "no AI backend is available, so no screenplay can be invented; returning blank outputs.")
 
         print(f"├─ Script Source: {script_source_name}")
         print(f"├─ Active Script Length: {len(active_script.splitlines())} lines")
         print(f"├─ Selected Output Format: {output_format}")
         print(f"├─ Target Aspect Ratio: {default_aspect_ratio}")
-        print(f"├─ Ollama AI Acceleration: {'ENABLED' if use_ollama_ai else 'DISABLED'} (Model: {ollama_model if use_ollama_ai else 'N/A'})")
+        print(f"├─ AI Stages: {'ENABLED' if use_llm else 'DISABLED'} "
+              f"(Backend: {llm_backend}; Model: {ollama_model if use_llm else 'N/A'})")
         print(f"├─ Active Character Profiles: {len(char_dict)}")
         print(f"├─ Active Prop Profiles: {len(prop_dict)}")
         print(f"└─ Active Location Profiles: {len(loc_dict)}")
@@ -3571,7 +3707,83 @@ class ScreenplayFormatterNode:
               f"{len(cleaned)} chars.")
         return cleaned, f"LLM Original (blank raw_script) - {info['genre']}, {info['pages']} pages"
 
+    def _resolve_local_llm(self, model_name):
+        """Resolve and load a Local: text encoder through ComfyUI's own loader."""
+        spec = _local_llm_spec(model_name)
+        if spec is None:
+            return None
+        path = _download_local_llm(spec)
+        key = (path, os.path.getmtime(path))
+        cached = _LOCAL_LLM_CACHE.get(key)
+        if cached is not None:
+            return cached
+        try:
+            import folder_paths
+            import comfy.sd
+            print("  ├─ [Local LLM] Loading %s into ComfyUI..." % os.path.basename(path))
+            clip = comfy.sd.load_clip(
+                ckpt_paths=[path],
+                embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                clip_type=comfy.sd.CLIPType.STABLE_DIFFUSION,
+                model_options={},
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "Could not load %s as a text-generation CLIP: %s"
+                % (os.path.basename(path), error))
+        if clip is None:
+            raise RuntimeError(
+                "ComfyUI loaded %s but did not recognise it as a text-generation model"
+                % os.path.basename(path))
+        _LOCAL_LLM_CACHE.clear()
+        _LOCAL_LLM_CACHE[key] = clip
+        return clip
+
+    def _call_clip_api(self, prompt, clip, timeout=300, num_predict=None, think=None):
+        """Generate text in-process with a ComfyUI text-generation CLIP.
+
+        This is the same tokenize/generate/decode path ComfyUI's Generate Text node
+        uses, so it needs no server and no extra inference package.
+        """
+        _check_processing_interrupted()
+        max_length = int(num_predict) if num_predict else 4096
+        # ComfyUI's CLIP.generate defaults seed=None and its sampler calls
+        # torch.Generator.manual_seed(seed), which rejects None, so a seed has to be
+        # passed explicitly.  A fresh seed per call keeps repeated Local: runs from
+        # returning the same screenplay every time.
+        seed = random.randint(1, 2 ** 31 - 1)
+        print("     [Local LLM] Generating up to %d tokens (seed %d)..." % (max_length, seed))
+        try:
+            try:
+                tokens = clip.tokenize(prompt, skip_template=False, min_length=1, thinking=bool(think))
+            except TypeError:
+                tokens = clip.tokenize(prompt)
+            options = dict(do_sample=True, max_length=max_length, temperature=0.7, top_k=64,
+                           top_p=0.95, min_p=0.05, repetition_penalty=1.05, presence_penalty=0.0,
+                           seed=seed)
+            try:
+                generated = clip.generate(tokens, **options)
+            except TypeError:
+                for key in ("min_p", "presence_penalty", "seed"):
+                    options.pop(key, None)
+                generated = clip.generate(tokens, **options)
+            text = str(clip.decode(generated) or "")
+            text = re.sub(r"^\s*(?:<[^>]+>\s*)?.*?</think>\s*", "", text, count=1, flags=re.S | re.I)
+            text = text.strip()
+            print("     [Local LLM] Response received (%d chars)." % len(text))
+            return text
+        except Exception as error:
+            if _is_processing_interrupted(error):
+                raise
+            print("     [Local LLM] ❌ Generation failed: %s" % error)
+            print("     [Local LLM] Connect a text-generation CLIP (Gemma 3/4, Qwen 3.5), not a diffusion text encoder.")
+            return ""
+
     def _call_ollama_api(self, prompt, model, url, timeout=300, num_predict=None, think=None):
+        active_clip = getattr(_SCREENPLAY_RUN, "clip", None)
+        if active_clip is not None:
+            return self._call_clip_api(prompt, active_clip, timeout=timeout,
+                                       num_predict=num_predict, think=think)
         endpoint = f"{url.rstrip('/')}/api/generate"
         request = {"model": model, "prompt": prompt, "stream": True}
         if num_predict is not None:
@@ -3814,7 +4026,7 @@ class ScreenplayFormatterNode:
                 print("  ├─ ⚠️ Prop extraction returned nothing parsable.")
                 return []
         elif not known_props:
-            print("  ├─ Props need local LLM extraction; no prop prompts generated (Ollama disabled).")
+            print("  ├─ Props need LLM extraction; no prop prompts generated (AI stages disabled).")
             return []
 
         existing = {_Registry._key(KIND_PROP, name) for name, _ in raw}

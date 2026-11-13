@@ -81,7 +81,7 @@ below says which nodes need what:
 | `tqdm` | Efficient Image Batch Loader |
 | `imageio-ffmpeg` **or** `ffmpeg` on `PATH` | Panorama 360 Rotate |
 | `psutil` | `device_manager.py` (Universal Loader) |
-| Ollama server | Batch Ollama Writer, Screenwriter, Character/Story nodes' AI options |
+| Ollama server | Optional: Batch Ollama Writer, Screenwriter, Character/Story nodes' AI options. The Screenwriter can use a connected `clip` or a `Local: ...` model instead. |
 | `openai-whisper` | Screenwriter audio-to-screenplay mode |
 | `ultralytics` YOLO models, ComfyUI BiRefNet, SAM3 (RMBG pack) | H3 Upscaler face detection, `ref_alpha` background removal |
 | `taehv.py` (optional, next to `__init__.py`) | fast path in VAE Decode Batched (WanVideo) |
@@ -1165,8 +1165,8 @@ lists and a colour palette.
   `use_ollama_ai` (BOOLEAN), `ollama_model` (STRING, default `llama3`), `ollama_url`,
   `script_override_mode` (`off` / `text` / `audio`), `trigger_words` (STRING),
   `characters_json`, `locations_json`, `props_json` (multiline JSON), `lock_last_generation`
-  (BOOLEAN), `stored_generation` (multiline STRING cache); optional `script_override_text`
-  (STRING, force input) and `script_override_audio` (AUDIO).
+  (BOOLEAN), `stored_generation` (multiline STRING cache); optional `clip` (CLIP),
+  `script_override_text` (STRING, force input) and `script_override_audio` (AUDIO).
 - **Outputs:** `script`, `shot_list`, `story_beats`, `story_length`, `shot_count`,
   `shot_lengths` (**list** of INT), `character_list`, `prop_list`, `location_list`,
   `color_palette`, `asset_list`.
@@ -1180,6 +1180,22 @@ lists and a colour palette.
   the output format changes or when switching to Print-Ready). In `audio` mode the connected
   clip sets `story_length` and every shot length, speech becomes dialogue under one `SPEAKER`
   cue, sung lines become a `SINGER` part and repeats without words become instrumental shots.
+- Local LLM: the optional `clip` input accepts a ComfyUI text-generation model loaded with
+  `CLIP Loader` (Gemma 3/4, Qwen 3.5), and an `ollama_model` value beginning with `Local:`
+  downloads that model into `models/text_encoders` on first run and runs it in-process. Both
+  bypass Ollama. ComfyUI's native Gemma 4 path covers E2B, E4B, 12B and 31B; only the first
+  three have Comfy-Org single-file downloads, so those are the Gemma entries offered here.
+  The 26B A4B is a mixture-of-experts model: ComfyUI's Gemma 4 text encoder has no MoE
+  support and Comfy-Org publishes no 26B file, so it cannot be loaded as a CLIP text
+  encoder here, native or GGUF. Run it through the Ollama backend instead - for example
+  the `gemma4:26b-a4b-it-q4_K_M` tag. For Qwen3.5, the
+  picker includes 4B bf16 and 9B int8; 9B is the largest text encoder Comfy-Org publishes
+  (there is no Comfy-Org 27B repack). Native quantized safetensors load through the same
+  path. `.gguf` text encoders are not handled by ComfyUI's built-in `CLIP Loader`: install a
+  GGUF-capable CLIP loader that supports the architecture (for example a ComfyUI-GGUF fork
+  with Qwen3.5 support) and connect its `CLIP` output to the Screenwriter's optional `clip`
+  input. The `Local:` picker intentionally stays on ComfyUI-native single files so it does
+  not add a third-party loader dependency.
 - Camera continuity: before the shot list is assembled, any shot that repeats its
   neighbour's shot size *and* camera angle is reframed — one rung on the size ladder, or a
   neutral angle change (low/high/over-the-shoulder) when the shot's own action fixes the
