@@ -37,6 +37,7 @@ from comfy_extras.nodes_minimax_h3 import (
 from .core import (
     AUDIO_LATENT_FPS,
     explicit_transition_mode,
+    FRAME_PER_TOKEN,
     frames_to_audio_latents,
     parse_timestamp,
     parse_timestamped_beats,
@@ -7850,6 +7851,10 @@ PIXEL_BATCH_AUTO_FLOOR = 8
 # Auto sizing grows the chunk until its expected peak reaches the free VRAM, so this is only a
 # sanity ceiling (the widget's own max), not a memory guess.
 PIXEL_BATCH_AUTO_MAX = 4096
+# latent segments: latent steps of context kept on each side of a window. The resizer's
+# temporal reach is deeper than this, but its far edge contributes little; raise it to trade
+# render time for even softer window seams.
+LATENT_SEGMENT_OVERLAP = 16
 # Off: feeding a chunk its own sharp output as context does not work at denoise 1.0. The masked
 # sampler holds only whole latents (so with an 8 frame overlap only the first 4 frames are held),
 # and the model then re-interprets the sharp frames it did not generate, which shows up as
@@ -9457,7 +9462,7 @@ class UltimateSDUpscaleMiniMaxH3:
                 "image": ("IMAGE", {"tooltip": "Single images keep the normal image upscale path. Batches with multiple images are treated as ordered video frames and H3 processes matching tiles as one temporal sequence. Needed for h3_upscale_mode = off / pixel, and as the latent-mode source when no latent is connected."}),
                 "audio": ("AUDIO", {"tooltip": "When connected, this audio is returned on the audio output unchanged in every mode, taking precedence over the latent's decoded audio. The node renders frames, so it never uses, encodes or decodes it."}),
                 "latent": ("LATENT", {"tooltip": "h3_upscale_mode = latent only: the H3 latent that latent_upscale_model resizes before it is decoded. When nothing is connected the image is encoded with the vae instead."}),
-                "h3_upscale_mode": (["off", "pixel", "pixel segments", "latent"], {"default": "latent", "tooltip": "off = the H3 Upscale group is bypassed (no resize, no tile diffusion). pixel = upscale/diffuse the image, optionally through upscale_model. pixel segments = the same render, written out one file per render into a folder in the output directory instead of assembled into one batch (for clips too long to hold); it also takes a latent and decodes it one render window at a time. latent = resize the H3 latent with latent_upscale_model, then decode it."}),
+                "h3_upscale_mode": (["off", "pixel", "pixel segments", "latent", "latent segments"], {"default": "latent", "tooltip": "off = the H3 Upscale group is bypassed (no resize, no tile diffusion). pixel = upscale/diffuse the image, optionally through upscale_model. pixel segments = the same render, written out one file per render into a folder in ComfyUI's temp directory instead of assembled into one batch (for clips too long to hold); it also takes a latent and decodes it one render window at a time, and a list of latents or images writes into one shared folder as a single sequence. latent = resize the H3 latent with latent_upscale_model, then decode it. latent segments = the same latent resize, run in overlapped temporal windows and written out one file per window, so a long clip never exists as one batch; needs the latent input and the vae."}),
                 "upscale_model": (upscale_models, {"default": "None", "tooltip": "pixel mode: upscale model from models/upscale_models. None = plain bicubic resize."}),
                 "latent_upscale_model": (latent_upscale_models, {"default": "None", "tooltip": "latent mode: H3 latent upscale checkpoint from models/latent_upscale_models."}),
                 "scale_to_megapixels": ("FLOAT", {"default": 1.3, "min": 0.1, "max": 16.0, "step": 0.1, "tooltip": "Output size in megapixels: the aspect ratio is kept and both sides are snapped to a multiple of 32 px. The node never shrinks the image."}),
@@ -10518,6 +10523,17 @@ class UltimateSDUpscaleMiniMaxH3:
         return folder
 
     @staticmethod
+    def _segments_written(folder):
+        """How many segments a folder already holds, so a list of latents keeps counting."""
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return 0
+        return sum(1 for name in names
+                   if name.startswith("segment_") and name.endswith(".mp4")
+                   and name[8:12].isdigit())
+
+    @staticmethod
     def _write_segment(folder, number, frames, fps=FPS):
         """Encode one render's frames to their own file and let them go.
 
@@ -10600,13 +10616,20 @@ class UltimateSDUpscaleMiniMaxH3:
             "after every render", tag, total / 2 ** 30, path)
         return torch.from_numpy(np.asarray(mapping)), mapping
 
-    @staticmethod
-    def _merge_image_batches(batches):
-        """One IMAGE batch holding every latent's frames, in order."""
+    def _merge_image_batches(self, batches, tag="merged clip"):
+        """One IMAGE batch holding every latent's frames, in order.
+
+        The frames are copied straight into a clip buffer instead of going through torch.cat.
+        A merge of several long latents is the whole finished video, and asking the CPU
+        allocator for that in one go is what fails when RAM is smaller than the clip: cat
+        needs the sources and the joined copy alive at the same time.  The buffer spills to
+        disk when the total does not fit, and each source is released as soon as its frames
+        have been copied.
+        """
         if len(batches) == 1:
             return batches[0]
         first = batches[0]
-        merged = []
+        uniform = []
         for index, batch in enumerate(batches):
             if batch.shape[1] != first.shape[1] or batch.shape[2] != first.shape[2]:
                 logger.warning(
@@ -10615,8 +10638,24 @@ class UltimateSDUpscaleMiniMaxH3:
                     index + 1, batch.shape[2], batch.shape[1], first.shape[2], first.shape[1],
                 )
                 batch = _resize_bhwc(batch, first.shape[1], first.shape[2])
-            merged.append(batch)
-        return torch.cat(merged, dim=0)
+            uniform.append(batch)
+        shape = (sum(int(batch.shape[0]) for batch in uniform),) + tuple(
+            int(v) for v in uniform[0].shape[1:])
+        merged, mapping = self._clip_buffer(shape, uniform[0].dtype, tag)
+        at = 0
+        for index, batch in enumerate(uniform):
+            count = int(batch.shape[0])
+            merged[at:at + count] = batch
+            uniform[index] = None
+            batches[index] = None
+            at += count
+            if mapping is not None:
+                mapping.flush()
+        if mapping is not None:
+            logger.info(
+                "[H3 Upscale] %s: %.2f GiB of frames written to disk instead of RAM",
+                tag, int(merged.numel()) * int(merged.element_size()) / 2 ** 30)
+        return merged
 
     @staticmethod
     def _merge_audio(audios):
@@ -10680,6 +10719,13 @@ class UltimateSDUpscaleMiniMaxH3:
             logger.info("[H3 Upscale] audio: the connected audio is passed straight through "
                         "(latent audio decode skipped)")
 
+        mode = inputs.get("h3_upscale_mode")
+        if isinstance(mode, (list, tuple)):
+            mode = mode[0] if mode else ""
+        segments = str(mode or "").strip().lower() in ("pixel segments", "latent segments")
+        # A list of latents is one continuous video, so every latent writes its segments into
+        # the same folder: numbering carries on and concat.txt stays one sequence.
+        shared_segments = self._segments_folder() if segments else ""
         results = [
             self._upscale_one(
                 image=self._pick_list_value(image_list, index),
@@ -10687,6 +10733,7 @@ class UltimateSDUpscaleMiniMaxH3:
                 positive=self._pick_list_value(positive_list, index),
                 negative=self._pick_list_value(negative_list, index),
                 **inputs,
+                **(dict(segments_dir=shared_segments) if segments else {}),
             )
             for index in range(count)
         ]
@@ -10696,14 +10743,137 @@ class UltimateSDUpscaleMiniMaxH3:
                 return (result[0], result[1], passthrough_audio, result[3])
             return result
 
-        images_out = self._merge_image_batches([result[0] for result in results])
-        debug_out = self._merge_image_batches([result[1] for result in results])
-        logger.info("[H3 Upscale] %d latent(s) merged into one batch of %d frame(s)",
-                    len(results), images_out.shape[0])
+        if segments:
+            # Every latent wrote into the folder above, so there is no batch to assemble: the
+            # segment list is the output and the image outputs stay empty, exactly as they do
+            # for a single latent in this mode.
+            images_out, debug_out = None, None
+            logger.info("[H3 Upscale] %d latent(s) written as segments in %s",
+                        len(results), shared_segments)
+        else:
+            # The merge owns the frames from here, so drop the copies still held in results:
+            # otherwise the finished clip stays alive a second time while its buffer is filled.
+            image_parts = [result[0] for result in results]
+            debug_parts = [result[1] for result in results]
+            results = [(None, None, result[2], result[3]) for result in results]
+            images_out = self._merge_image_batches(image_parts, "pixel batch")
+            debug_out = self._merge_image_batches(debug_parts, "face debug")
+            logger.info("[H3 Upscale] %d latent(s) merged into one batch of %d frame(s)",
+                        len(results), images_out.shape[0])
         audio_out = (passthrough_audio if passthrough_audio is not None
                      else self._merge_audio([result[2] for result in results]))
-        return (images_out, debug_out, audio_out,
-                ";".join(result[3] for result in results if result[3]))
+        notes = [result[3] for result in results if result[3]]
+        if segments:
+            # One folder was shared, so report it once instead of once per latent.
+            notes = list(dict.fromkeys(notes))
+        return (images_out, debug_out, audio_out, ";".join(notes))
+
+    @staticmethod
+    def _tokens_for_frames(frames):
+        """Smallest H3 latent step count whose packed span covers `frames`."""
+        frames = max(1, int(frames))
+        tokens = 0
+        while video_frames_for_latents(tokens) < frames:
+            tokens += 1
+        return tokens
+
+    def _latent_segments(self, **kwargs):
+        """h3_upscale_mode = latent segments: resize the latent in windows and encode each one.
+
+        Pixel segments made long clips possible by never assembling them; this is the same policy
+        for the latent path. The learned resizer is a 3D convolution, so each window is rendered
+        with real context on both sides and only its middle is kept - every emitted frame sits a
+        full overlap clear of a window edge, which is where a convolution runs out of neighbours.
+        The resizer preserves temporal, so a window lands on the same packed boundaries the
+        decoder uses and the segments join in order.
+        """
+        latent = kwargs.get("latent")
+        vae = kwargs.get("vae")
+        model_name = str(kwargs.get("latent_upscale_model") or "").strip()
+        samples = self._video_latent_samples(latent)
+        if samples is None:
+            raise ValueError(
+                "h3_upscale_mode = latent segments needs the latent input - encode the source "
+                "with the vae, or use pixel segments for image input")
+        if vae is None:
+            raise ValueError(
+                "h3_upscale_mode = latent segments needs the vae input to decode each window")
+        if not model_name or model_name.lower() == "none":
+            raise ValueError(
+                "h3_upscale_mode = latent segments needs a latent_upscale_model "
+                "(place H3 latent checkpoints in models/latent_upscale_models)")
+
+        source_h = int(samples.shape[-2]) * 16
+        source_w = int(samples.shape[-1]) * 16
+        target_w, target_h = scale_to_megapixel_target(
+            source_w, source_h, float(kwargs.get("scale_to_megapixels") or 1.0),
+        )
+        target_lat_h = max(int(samples.shape[-2]), max(1, int(target_h) // 16))
+        target_lat_w = max(int(samples.shape[-1]), max(1, int(target_w) // 16))
+
+        total = int(samples.shape[2])
+        frames_total = video_frames_for_latents(total)
+        room = auto_pixel_batch_frames(frames_total, target_lat_h * 16, target_lat_w * 16)
+        budget = max(H3_FRAME_GRID_BASE,
+                     min(int(room or PIXEL_BATCH_CHUNK), PIXEL_BATCH_CHUNK))
+        # The packing pattern (FRAME_PER_TOKEN) repeats, so a window has to start on a period
+        # boundary: a slice that starts mid-period decodes a few frames fewer than the span it
+        # is cut from, and the trim below would drop real frames at every seam.
+        period = max(1, len(FRAME_PER_TOKEN))
+        overlap = (max(0, int(LATENT_SEGMENT_OVERLAP)) // period) * period
+        # A window is decoded with its context on both sides, so that context comes out of the
+        # same frame budget one pixel render is allowed.
+        owned = max(H3_FRAME_GRID_BASE, budget - 2 * video_frames_for_latents(overlap))
+        window = self._tokens_for_frames(owned)
+        window = max(period, ((window + period - 1) // period) * period)
+        window = min(window, max(period, total))
+        overlap = min(overlap, max(0, window - period))
+        segments_dir = str(kwargs.get("segments_dir") or "").strip() or self._segments_folder()
+        number = self._segments_written(segments_dir)
+        logger.info(
+            "[H3 Upscale] latent segments: %d latent step(s) = %d frame(s), %dx%d px per "
+            "segment, windows of %d step(s) with %d step(s) of context",
+            total, frames_total, target_lat_w * 16, target_lat_h * 16, window, overlap)
+
+        written = 0
+        made = 0
+        start = 0
+        while start < total:
+            stop = min(total, start + window)
+            first = max(0, start - overlap)
+            last = min(total, stop + overlap)
+            slice_latent = samples[:, :, first:last].detach()
+            upscaled = upscale_h3_latent(
+                slice_latent, model_name=model_name,
+                target_h=target_lat_h, target_w=target_lat_w)
+            window_frames = video_frames_for_latents(int(upscaled.shape[2]))
+            frames = self._decode_latent_window(vae, upscaled, 0, window_frames)
+            low = video_frames_for_latents(start) - video_frames_for_latents(first)
+            high = int(frames.shape[0]) - (video_frames_for_latents(last)
+                                            - video_frames_for_latents(stop))
+            piece = frames[low:high]
+            if int(piece.shape[0]) > 0:
+                number += 1
+                made += 1
+                self._write_segment(segments_dir, number, piece)
+                written += int(piece.shape[0])
+            else:
+                logger.warning(
+                    "[H3 Upscale] latent segments: window %d-%d decoded no frame of its own",
+                    start, stop)
+            piece = None
+            start = stop
+
+        audio = self._decode_latent_audio(latent, kwargs.get("audio_vae"))
+        if written != frames_total:
+            logger.warning(
+                "[H3 Upscale] latent segments: the windows covered %d of %d frame(s)",
+                written, frames_total)
+        logger.info(
+            "[H3 Upscale] latent segments: %d frame(s) written as %d segment(s) in %s - join "
+            "them in order with: ffmpeg -f concat -safe 0 -i concat.txt -c copy joined.mp4",
+            written, made, segments_dir)
+        return (None, None, audio, segments_dir)
 
     # A ComfyUI image batch is one tensor through the whole pixel pipeline: resized, diffused tile by
     # tile, face-detailed and colour-graded. A few hundred 4K frames of that is what runs a card out
@@ -11084,6 +11254,8 @@ class UltimateSDUpscaleMiniMaxH3:
         image = kwargs.get("image")
         latent = kwargs.get("latent")
         mode = str(kwargs.get("h3_upscale_mode") or "off").strip().lower()
+        if mode == "latent segments":
+            return self._latent_segments(**kwargs)
         # off / latent: the pipeline renders the whole clip itself, and it is the pipeline that
         # knows whether it has a latent to work from instead of frames. This comes before anything
         # reads image.shape, so a latent-only graph reaches that path instead of failing here.
@@ -11098,9 +11270,18 @@ class UltimateSDUpscaleMiniMaxH3:
                 "h3_upscale_mode = %s needs the image input, or a latent in pixel segments: a "
                 "latent is only decoded window by window there (otherwise use "
                 "h3_upscale_mode = latent)" % mode)
-        segments_dir = self._segments_folder() if segments else ""
+        segments_dir = ""
         segments_made = 0
         debug_skipped = False
+        if segments:
+            # A caller rendering a list of latents hands in one folder for the whole run, so
+            # its segments are numbered after the ones already there instead of restarting at 1
+            # and overwriting them.
+            segments_dir = str(kwargs.pop("segments_dir", "") or "").strip()
+            if not segments_dir:
+                segments_dir = self._segments_folder()
+            segments_made = self._segments_written(segments_dir)
+        segments_before = segments_made
         if latent_samples is not None:
             frame_count = video_frames_for_latents(int(latent_samples.shape[2]))
             source_h = int(latent_samples.shape[-2]) * 16
@@ -11771,7 +11952,7 @@ class UltimateSDUpscaleMiniMaxH3:
             logger.info(
                 "[H3 Upscale] pixel batch: %d frame(s) written as %d segment(s) in %s - join them "
                 "in order with: ffmpeg -f concat -safe 0 -i concat.txt -c copy joined.mp4",
-                written, segments_made, segments_dir)
+                written, segments_made - segments_before, segments_dir)
             if debug_skipped:
                 logger.info("[H3 Upscale] pixel segments: the face debug frames are not written - "
                             "the segment files are the output")
